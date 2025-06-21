@@ -2,10 +2,18 @@ package main
 
 import (
 	"fmt"
+	"log"
+	"os"
 	"sync"
 	"time"
 
 	"go.etcd.io/bbolt"
+)
+
+// Global database connection pool to prevent multiple connections to the same file
+var (
+	dbConnections = make(map[string]*bbolt.DB)
+	dbMutex       sync.RWMutex
 )
 
 // MemoryStore is an in-memory key-value store for blocks and other data.
@@ -52,26 +60,85 @@ type BoltStore struct {
 	bucketName string
 }
 
+// getOrCreateDBConnection returns an existing database connection or creates a new one
+func getOrCreateDBConnection(path string) (*bbolt.DB, error) {
+	dbMutex.Lock()
+	defer dbMutex.Unlock()
+
+	// Check if we already have a connection to this database
+	if db, exists := dbConnections[path]; exists {
+		log.Printf("Reusing existing database connection for %s", path)
+		return db, nil
+	}
+
+	// Check if file exists and log for debugging
+	if _, err := os.Stat(path); err == nil {
+		log.Printf("Database file %s already exists", path)
+	} else if os.IsNotExist(err) {
+		log.Printf("Creating new database file at %s", path)
+	} else {
+		log.Printf("Warning: Could not stat database file %s: %v", path, err)
+	}
+
+	// Create new database connection
+	db, err := bbolt.Open(path, 0600, &bbolt.Options{
+		Timeout:      10 * time.Second,
+		NoGrowSync:   false,
+		FreelistType: bbolt.FreelistArrayType,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database at %s: %w", path, err)
+	}
+
+	log.Printf("Successfully opened database at %s", path)
+
+	// Store the connection in our pool
+	dbConnections[path] = db
+
+	return db, nil
+}
+
 // NewBoltStore creates or opens a BoltDB database at the given path and bucket.
 func NewBoltStore(path, bucketName string) (*BoltStore, error) {
-	db, err := bbolt.Open(path, 0600, &bbolt.Options{Timeout: 1 * time.Second})
+	db, err := getOrCreateDBConnection(path)
 	if err != nil {
 		return nil, err
 	}
+
 	// Ensure the requested bucket exists
 	err = db.Update(func(tx *bbolt.Tx) error {
 		_, err := tx.CreateBucketIfNotExists([]byte(bucketName))
-		return err
+		if err != nil {
+			return fmt.Errorf("failed to create bucket %s: %w", bucketName, err)
+		}
+		log.Printf("Successfully created/verified bucket %s", bucketName)
+		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to initialize bucket %s: %w", bucketName, err)
 	}
 	return &BoltStore{db: db, path: path, bucketName: bucketName}, nil
 }
 
 // Close closes the database connection.
 func (s *BoltStore) Close() error {
-	return s.db.Close()
+	// Don't actually close the database here since it might be shared
+	// The database will be closed when the application shuts down
+	return nil
+}
+
+// CloseAllDBConnections closes all database connections (call this on application shutdown)
+func CloseAllDBConnections() {
+	dbMutex.Lock()
+	defer dbMutex.Unlock()
+
+	for path, db := range dbConnections {
+		log.Printf("Closing database connection for %s", path)
+		if err := db.Close(); err != nil {
+			log.Printf("Error closing database %s: %v", path, err)
+		}
+	}
+	dbConnections = make(map[string]*bbolt.DB)
 }
 
 // Put saves a key-value pair in the store's bucket.

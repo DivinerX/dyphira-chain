@@ -144,7 +144,7 @@ func (n *P2PNode) Connect(ctx context.Context, peerAddr string) error {
 
 // Discover uses the DHT to find and connect to peers in the network.
 func (n *P2PNode) Discover(ctx context.Context) {
-	rendezvousString := "dyphria-l1-network"
+	rendezvousString := "dyphira-l1-network"
 
 	routingDiscovery := discovery_routing.NewRoutingDiscovery(n.dht)
 	util.Advertise(ctx, routingDiscovery, rendezvousString)

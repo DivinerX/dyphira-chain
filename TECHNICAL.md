@@ -1,4 +1,4 @@
-# Dyphria-L1 DPoS Blockchain - Technical Documentation
+# dyphira-L1 DPoS Blockchain - Technical Documentation
 
 ## Table of Contents
 - [Architecture Overview](#architecture-overview)
@@ -119,9 +119,9 @@ sequenceDiagram
 - **Peer Discovery**: Kademlia DHT
 - **Pub/Sub**: GossipSub
 - **Topics**:
-  - `/dyphria/transactions/v1` (transactions)
-  - `/dyphria/blocks/v1` (block proposals)
-  - `/dyphria/approvals/v1` (block approvals)
+  - `/dyphira/transactions/v1` (transactions)
+  - `/dyphira/blocks/v1` (block proposals)
+  - `/dyphira/approvals/v1` (block approvals)
 
 ### P2PNode
 - Manages libp2p host, pubsub, DHT

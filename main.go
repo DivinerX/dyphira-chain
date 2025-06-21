@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -24,8 +27,14 @@ func main() {
 	defer cancel()
 
 	// --- 1. Initialization ---
-	dbPath := fmt.Sprintf("dyphria-%d.db", *port)
-	os.Remove(dbPath) // Clean up previous DB for a fresh start
+	dbPath := fmt.Sprintf("dyphira-%d.db", *port)
+
+	// Clean up previous DB for a fresh start with better error handling
+	if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
+		log.Printf("Warning: Could not remove existing database file %s: %v", dbPath, err)
+		// Wait a bit to ensure any file locks are released
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	// --- 2. Create Node Identity ---
 	// Generate ECDSA private key for blockchain signing
@@ -57,6 +66,23 @@ func main() {
 		}
 	}
 
+	// --- 5. Set up graceful shutdown ---
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
 	fmt.Println("Node is running. Press Ctrl+C to exit.")
-	select {} // Block forever
+
+	// Wait for shutdown signal
+	<-sigChan
+	fmt.Println("\nShutting down gracefully...")
+
+	// Close the node
+	if err := node.Close(); err != nil {
+		log.Printf("Error closing node: %v", err)
+	}
+
+	// Close all database connections
+	CloseAllDBConnections()
+
+	fmt.Println("Node shutdown complete.")
 }

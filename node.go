@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	TransactionTopic = "/dyphria/transactions/v1"
-	BlockTopic       = "/dyphria/blocks/v1"
-	ApprovalTopic    = "/dyphria/approvals/v1"
+	TransactionTopic = "/dyphira/transactions/v1"
+	BlockTopic       = "/dyphira/blocks/v1"
+	ApprovalTopic    = "/dyphira/approvals/v1"
 	EpochLength      = 10 // blocks
 )
 

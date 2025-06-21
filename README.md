@@ -1,4 +1,4 @@
-# Dyphria-L1 DPoS Blockchain - Developer Documentation
+# dyphira-L1 DPoS Blockchain - Developer Documentation
 
 ## Overview
 
@@ -46,19 +46,19 @@ See `go.mod` for the full list.
 ### Build
 
 ```bash
-go build -o dyphria-l1
+go build -o dyphira-l1
 ```
 
 ### Run
 
 ```bash
-./dyphria-l1 -port 9000
+./dyphira-l1 -port 9000
 ```
 
 - `-port` (default: 8080): TCP port for P2P networking
 - `-peer`: (optional) Multiaddress of a peer to connect to (e.g., `/ip4/127.0.0.1/tcp/9001/p2p/<peer-id>`)
 
-Each node creates its own database file (`dyphria-<port>.db`). On startup, the node:
+Each node creates its own database file (`dyphira-<port>.db`). On startup, the node:
 
 1. Generates ECDSA and libp2p keys
 2. Registers itself as a validator
@@ -70,7 +70,7 @@ Each node creates its own database file (`dyphria-<port>.db`). On startup, the n
 ## Network and Consensus
 
 - **P2P**: Uses libp2p GossipSub for pub/sub messaging and Kademlia DHT for peer discovery.
-- **Topics**: `/dyphria/transactions/v1`, `/dyphria/blocks/v1`, `/dyphria/approvals/v1`
+- **Topics**: `/dyphira/transactions/v1`, `/dyphira/blocks/v1`, `/dyphira/approvals/v1`
 - **DPoS**: Every epoch (10 blocks), a committee is selected based on stake, delegation, and reputation.
 - **Block Production**: Proposer is rotated round-robin within the committee.
 - **Block Approval**: At least 2/3 of the committee must sign a block for it to be finalized.
@@ -148,9 +148,9 @@ Integration tests in `node_test.go` simulate multiple nodes, block production, t
 1. Start multiple nodes on different ports:
 
    ```bash
-   ./dyphria-l1 -port 9000
-   ./dyphria-l1 -port 9001 -peer /ip4/127.0.0.1/tcp/9000/p2p/<peer-id>
-   ./dyphria-l1 -port 9002 -peer /ip4/127.0.0.1/tcp/9000/p2p/<peer-id>
+   ./dyphira-l1 -port 9000
+   ./dyphira-l1 -port 9001 -peer /ip4/127.0.0.1/tcp/9000/p2p/<peer-id>
+   ./dyphira-l1 -port 9002 -peer /ip4/127.0.0.1/tcp/9000/p2p/<peer-id>
    ```
 
 2. Nodes will discover each other, elect a committee, and start producing/approving blocks.

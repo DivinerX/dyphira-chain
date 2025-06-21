@@ -50,7 +50,7 @@ func setupTestNodes(t *testing.T, numNodes int) []*AppNode {
 	writers := []io.Writer{os.Stderr}
 
 	// --- Shared validator store for all nodes ---
-	sharedValidatorsDBPath, err := os.MkdirTemp("", "dyphria_shared_validators")
+	sharedValidatorsDBPath, err := os.MkdirTemp("", "dyphira_shared_validators")
 	require.NoError(t, err)
 	validatorsDBPath := filepath.Join(sharedValidatorsDBPath, "validators.db")
 	validatorStore, err := NewBoltStore(validatorsDBPath, "validators")
@@ -60,7 +60,7 @@ func setupTestNodes(t *testing.T, numNodes int) []*AppNode {
 	// --- 1. Create all nodes (register as validators, but do not start yet) ---
 	for i := 0; i < numNodes; i++ {
 		port := 9000 + i
-		tempDir, err := os.MkdirTemp("", fmt.Sprintf("dyphria_test_%d", port))
+		tempDir, err := os.MkdirTemp("", fmt.Sprintf("dyphira_test_%d", port))
 		require.NoError(t, err)
 		chainDBPath := filepath.Join(tempDir, "chain.db")
 		t.Cleanup(func() { os.RemoveAll(tempDir) })

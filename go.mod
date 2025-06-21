@@ -1,4 +1,4 @@
-module dyphria-l1
+module dyphira-l1
 
 go 1.24.4
 
@@ -118,4 +118,4 @@ require (
 	lukechampine.com/blake3 v1.2.1 // indirect
 )
 
-replace dyphria-l1/types => ./types
+replace dyphira-l1/types => ./types

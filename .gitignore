@@ -8,3 +8,9 @@
 .env.production.local
 
 *.log
+
+*.db
+logs/
+pids/
+
+dyphira-
