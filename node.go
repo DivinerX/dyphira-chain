@@ -7,20 +7,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"strings"
+	"sort"
 	"sync"
 	"time"
 
+	"bytes"
+	"crypto/elliptic"
+
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	crypto "github.com/libp2p/go-libp2p/core/crypto"
-	"golang.org/x/crypto/sha3"
 )
 
 const (
-	TransactionTopic = "/dyphira/transactions/v1"
-	BlockTopic       = "/dyphira/blocks/v1"
-	ApprovalTopic    = "/dyphira/approvals/v1"
-	EpochLength      = 10 // blocks
+	TransactionTopic   = "/dyphira/transactions/v1"
+	BlockTopic         = "/dyphira/blocks/v1"
+	ApprovalTopic      = "/dyphira/approvals/v1"
+	BlockRequestTopic  = "/dyphira/block-requests/v1"
+	BlockResponseTopic = "/dyphira/block-responses/v1"
+	ValidatorTopic     = "/dyphira/validators/v1"
+	EpochLength        = 270 // blocks - matches specification
+	CommitteeSize      = 30
 )
 
 // AppNode represents the full blockchain application.
@@ -35,10 +41,11 @@ type AppNode struct {
 	address Address
 
 	// DPoS / Consensus
-	committee        []*Validator
-	proposerSelector *ProposerSelector
-	pendingBlocks    map[Hash]*BlockApproval
-	pendingBlocksMu  sync.RWMutex
+	committeeSelector *CommitteeSelector
+	proposerSelector  *ProposerSelector
+	committee         []*Validator
+	pendingBlocks     map[Hash]*BlockApproval
+	pendingBlocksMu   sync.RWMutex
 
 	// Buffer for approvals received before the block
 	approvalBuffer   map[Hash][]*Approval
@@ -46,6 +53,13 @@ type AppNode struct {
 
 	// Inactivity tracking for committee members
 	inactivity map[Address]int
+
+	// Database stores
+	chainStore     Storage
+	validatorStore Storage
+
+	// --- TESTING ONLY ---
+	DisableTestTransactions bool // If true, disables addTestTransactions in Start()
 }
 
 // --- Add a global test hook for committee sync (for tests only) ---
@@ -58,8 +72,10 @@ func NewAppNode(ctx context.Context, listenPort int, dbPath string, p2pPrivKey c
 	if err != nil {
 		return nil, fmt.Errorf("failed to open chain store: %w", err)
 	}
-	validatorStore, err := NewBoltStore(dbPath, "validators")
+	validatorDbPath := dbPath + ".validators"
+	validatorStore, err := NewBoltStore(validatorDbPath, "validators")
 	if err != nil {
+		chainStore.Close() // Clean up chain store if validator store fails
 		return nil, fmt.Errorf("failed to open validator store: %w", err)
 	}
 
@@ -72,44 +88,58 @@ func NewAppNode(ctx context.Context, listenPort int, dbPath string, p2pPrivKey c
 	vr := NewValidatorRegistry(validatorStore, "validators")
 	txPool := NewTransactionPool()
 
+	// Clear any existing validators to ensure clean state
+	if err := vr.ClearAllValidators(); err != nil {
+		return nil, fmt.Errorf("failed to clear validator registry: %w", err)
+	}
+
 	// --- P2P Component ---
 	p2p, err := NewP2PNode(ctx, listenPort, p2pPrivKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create P2P node: %w", err)
 	}
 
-	// Use the libp2p public key to derive the blockchain address
-	pubKeyBytes, err := p2pPrivKey.GetPublic().Raw()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get public key: %w", err)
-	}
-	var addr Address
-	copy(addr[:], pubKeyBytes[:20])
+	// Use the ECDSA public key to derive the blockchain address
+	addr := pubKeyToAddress(&privKey.PublicKey)
 
 	node := &AppNode{
-		p2p:            p2p,
-		bc:             bc,
-		state:          state,
-		txPool:         txPool,
-		vr:             vr,
-		ctx:            ctx,
-		privKey:        privKey,
-		address:        addr,
-		pendingBlocks:  make(map[Hash]*BlockApproval),
-		approvalBuffer: make(map[Hash][]*Approval),
-		inactivity:     make(map[Address]int),
+		p2p:               p2p,
+		bc:                bc,
+		state:             state,
+		txPool:            txPool,
+		vr:                vr,
+		ctx:               ctx,
+		privKey:           privKey,
+		address:           addr,
+		committeeSelector: &CommitteeSelector{Registry: vr},
+		pendingBlocks:     make(map[Hash]*BlockApproval),
+		approvalBuffer:    make(map[Hash][]*Approval),
+		inactivity:        make(map[Address]int),
+		chainStore:        chainStore,
+		validatorStore:    validatorStore,
 	}
 
-	// Register self as a validator
+	// Register self as a validator (participating by default)
 	if err := vr.RegisterValidator(&Validator{Address: addr, Stake: 100, Participating: true}); err != nil {
 		return nil, fmt.Errorf("failed to register self as validator: %w", err)
 	}
-	log.Printf("Node %s registered as validator", addr.ToHex())
+
+	// Give initial balance to the validator account
+	initialAccount := &Account{
+		Address: addr,
+		Balance: 1000, // Initial balance for testing
+		Nonce:   0,
+	}
+	if err := state.PutAccount(initialAccount); err != nil {
+		return nil, fmt.Errorf("failed to set initial account balance: %w", err)
+	}
+
+	log.Printf("Node %s registered as validator (ECDSA address, participating) with initial balance %d", addr.ToHex(), initialAccount.Balance)
 	return node, nil
 }
 
 // NewAppNodeWithStores creates a node with explicit chain and validator stores (for testing).
-func NewAppNodeWithStores(ctx context.Context, listenPort int, p2pPrivKey crypto.PrivKey, privKey *ecdsa.PrivateKey, chainStore *BoltStore, validatorStore *BoltStore) (*AppNode, error) {
+func NewAppNodeWithStores(ctx context.Context, listenPort int, p2pPrivKey crypto.PrivKey, privKey *ecdsa.PrivateKey, chainStore Storage, validatorStore Storage) (*AppNode, error) {
 	// --- Blockchain Components ---
 	bc, err := NewBlockchain(chainStore)
 	if err != nil {
@@ -119,50 +149,69 @@ func NewAppNodeWithStores(ctx context.Context, listenPort int, p2pPrivKey crypto
 	vr := NewValidatorRegistry(validatorStore, "validators")
 	txPool := NewTransactionPool()
 
+	// Clear any existing validators to ensure clean state
+	if err := vr.ClearAllValidators(); err != nil {
+		return nil, fmt.Errorf("failed to clear validator registry: %w", err)
+	}
+
 	// --- P2P Component ---
 	p2p, err := NewP2PNode(ctx, listenPort, p2pPrivKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create P2P node: %w", err)
 	}
 
-	// Use the libp2p public key to derive the blockchain address
-	pubKeyBytes, err := p2pPrivKey.GetPublic().Raw()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get public key: %w", err)
-	}
-	var addr Address
-	copy(addr[:], pubKeyBytes[:20])
+	// Use the ECDSA public key to derive the blockchain address
+	addr := pubKeyToAddress(&privKey.PublicKey)
 
 	node := &AppNode{
-		p2p:            p2p,
-		bc:             bc,
-		state:          state,
-		txPool:         txPool,
-		vr:             vr,
-		ctx:            ctx,
-		privKey:        privKey,
-		address:        addr,
-		pendingBlocks:  make(map[Hash]*BlockApproval),
-		approvalBuffer: make(map[Hash][]*Approval),
-		inactivity:     make(map[Address]int),
+		p2p:               p2p,
+		bc:                bc,
+		state:             state,
+		txPool:            txPool,
+		vr:                vr,
+		ctx:               ctx,
+		privKey:           privKey,
+		address:           addr,
+		committeeSelector: &CommitteeSelector{Registry: vr},
+		pendingBlocks:     make(map[Hash]*BlockApproval),
+		approvalBuffer:    make(map[Hash][]*Approval),
+		inactivity:        make(map[Address]int),
+		chainStore:        chainStore,
+		validatorStore:    validatorStore,
 	}
 
-	// Register self as a validator
+	// Register self as a validator (participating by default)
 	if err := vr.RegisterValidator(&Validator{Address: addr, Stake: 100, Participating: true}); err != nil {
 		return nil, fmt.Errorf("failed to register self as validator: %w", err)
 	}
-	log.Printf("Node %s registered as validator", addr.ToHex())
+
+	// Give initial balance to the validator account
+	initialAccount := &Account{
+		Address: addr,
+		Balance: 1000, // Initial balance for testing
+		Nonce:   0,
+	}
+	if err := state.PutAccount(initialAccount); err != nil {
+		return nil, fmt.Errorf("failed to set initial account balance: %w", err)
+	}
+
+	log.Printf("Node %s registered as validator (ECDSA address, participating) with initial balance %d", addr.ToHex(), initialAccount.Balance)
 	return node, nil
 }
 
 // Close gracefully shuts down the node.
 func (n *AppNode) Close() error {
+	log.Printf("Closing node %s", n.address.ToHex())
 	// Close the p2p host, blockchain db, etc.
 	if err := n.p2p.host.Close(); err != nil {
-		return fmt.Errorf("failed to close p2p host: %w", err)
+		log.Printf("Error closing p2p host: %v", err)
+		// Continue closing other resources
 	}
-	if err := n.bc.Close(); err != nil {
-		return fmt.Errorf("failed to close blockchain: %w", err)
+	if err := n.chainStore.Close(); err != nil {
+		log.Printf("Error closing chain store: %v", err)
+	}
+	if err := n.validatorStore.Close(); err != nil {
+		log.Printf("Error closing validator store: %v", err)
 	}
 	return nil
 }
@@ -172,10 +221,39 @@ func (n *AppNode) Start() error {
 	n.p2p.RegisterTopic(TransactionTopic)
 	n.p2p.RegisterTopic(BlockTopic)
 	n.p2p.RegisterTopic(ApprovalTopic)
+	n.p2p.RegisterTopic(BlockRequestTopic)
+	n.p2p.RegisterTopic(BlockResponseTopic)
+	n.p2p.RegisterTopic(ValidatorTopic)
 
 	go n.p2p.Subscribe(n.ctx, n.handleNetworkMessage)
 	go n.p2p.Discover(n.ctx)
 	go n.producerLoop()
+
+	// Broadcast our validator registration to the network
+	go n.broadcastValidatorRegistration()
+
+	// After a short delay, initialize all known validator accounts with a starting balance, then add test transactions
+	if !n.DisableTestTransactions {
+		go func() {
+			time.Sleep(8 * time.Second)
+			validators, err := n.vr.GetAllValidators()
+			if err != nil {
+				log.Printf("ERROR: Failed to get all validators for initial account setup: %v", err)
+				return
+			}
+			for _, v := range validators {
+				acc, _ := n.state.GetAccount(v.Address)
+				if acc.Balance == 0 {
+					acc.Balance = 1000
+					if err := n.state.PutAccount(acc); err != nil {
+						log.Printf("ERROR: Failed to set initial balance for validator %s: %v", v.Address.ToHex(), err)
+					}
+					log.Printf("INFO: Initialized account for validator %s with balance 1000", v.Address.ToHex())
+				}
+			}
+			n.addTestTransactions()
+		}()
+	}
 
 	return nil
 }
@@ -190,349 +268,703 @@ func (n *AppNode) handleNetworkMessage(topic string, msg *pubsub.Message) {
 		n.handleBlockProposal(msg)
 	case ApprovalTopic:
 		n.handleApproval(msg)
+	case BlockRequestTopic:
+		n.handleBlockRequest(msg)
+	case BlockResponseTopic:
+		n.handleBlockResponse(msg)
+	case ValidatorTopic:
+		n.handleValidatorRegistration(msg)
 	}
 }
 
 func (n *AppNode) handleTransaction(msg *pubsub.Message) {
+	log.Printf("DEBUG: Node %s received transaction message, data size: %d bytes", n.address.ToHex(), len(msg.Data))
+
 	var netTx NetworkTransaction
 	if err := json.Unmarshal(msg.Data, &netTx); err != nil {
 		log.Printf("Failed to decode network tx: %v", err)
 		return
 	}
-	if err := n.txPool.AddTransaction(netTx.Tx, netTx.PubKey, n.state); err != nil {
-		if !strings.Contains(err.Error(), "already in pool") {
-			log.Printf("Failed to add tx %s from network: %v", netTx.Tx.Hash.ToHex(), err)
-		}
-	} else {
-		log.Printf("Added transaction %s to pool", netTx.Tx.Hash.ToHex())
+
+	log.Printf("DEBUG: Node %s received transaction %s", n.address.ToHex(), netTx.Tx.Hash.ToHex())
+
+	pubKey, err := UnmarshalPublicKey(elliptic.P256(), netTx.PubKey)
+	if err != nil {
+		log.Printf("Failed to unmarshal public key: %v", err)
+		return
 	}
+
+	if err := n.txPool.AddTransaction(netTx.Tx, pubKey, n.state); err != nil {
+		log.Printf("Failed to add transaction to pool: %v", err)
+		return
+	}
+
+	log.Printf("SUCCESS: Node %s added transaction %s to pool", n.address.ToHex(), netTx.Tx.Hash.ToHex())
 }
 
 func (n *AppNode) handleBlockProposal(msg *pubsub.Message) {
+	log.Printf("DEBUG: Node %s received block message, data size: %d bytes", n.address.ToHex(), len(msg.Data))
 	var block Block
 	if err := json.Unmarshal(msg.Data, &block); err != nil {
-		log.Printf("ERROR: Failed to decode block proposal: %v", err)
+		log.Printf("Failed to decode block proposal: %v", err)
 		return
 	}
-	log.Printf("INFO: Node %s received block proposal #%d from %s", n.address.ToHex(), block.Header.BlockNumber, block.Header.Proposer.ToHex())
+	n.processReceivedBlock(&block)
+}
 
-	// TODO: Add block validation (check proposer, etc.)
-
+func (n *AppNode) processReceivedBlock(block *Block) {
 	n.pendingBlocksMu.Lock()
 	if _, exists := n.pendingBlocks[block.Header.Hash]; exists {
-		log.Printf("WARN: Node %s already saw block %s. Ignoring.", n.address.ToHex(), block.Header.Hash.ToHex())
+		log.Printf("DEBUG: Node %s already has block %s pending, ignoring.", n.address.ToHex(), block.Header.Hash.ToHex())
 		n.pendingBlocksMu.Unlock()
-		return // Already seen
+		return
 	}
-	ba := NewBlockApproval(&block, n.committee)
-	n.pendingBlocks[block.Header.Hash] = ba
 	n.pendingBlocksMu.Unlock()
 
-	// --- Process any buffered approvals for this block ---
-	n.approvalBufferMu.Lock()
-	buffered := n.approvalBuffer[block.Header.Hash]
-	delete(n.approvalBuffer, block.Header.Hash)
-	n.approvalBufferMu.Unlock()
-	for _, approval := range buffered {
-		n.processApproval(approval)
+	if n.bc.HasBlock(block.Header.Hash) {
+		log.Printf("DEBUG: Node %s already has block %s in the chain, ignoring.", n.address.ToHex(), block.Header.Hash.ToHex())
+		return
 	}
 
-	// Start a timer to handle block approval timeout.
-	go n.watchBlockApproval(&block)
+	currentHeight := n.bc.Height()
+	maxAllowedHeight := currentHeight + 10 // Allow generous catch-up
 
-	// If this node is on the committee, vote.
-	for _, member := range n.committee {
-		if member.Address == n.address {
-			log.Printf("INFO: Node %s (committee member) is voting for block #%d", n.address.ToHex(), block.Header.BlockNumber)
-			n.broadcastApproval(&block)
+	if block.Header.BlockNumber > maxAllowedHeight {
+		log.Printf("WARN: Node %s ignoring block #%d too far ahead (max: %d), current height: %d",
+			n.address.ToHex(), block.Header.BlockNumber, maxAllowedHeight, currentHeight)
+		return
+	}
+
+	if block.Header.BlockNumber < currentHeight {
+		log.Printf("WARN: Node %s ignoring old block #%d, current height: %d",
+			n.address.ToHex(), block.Header.BlockNumber, currentHeight)
+		return
+	}
+
+	log.Printf("DEBUG: Node %s processing block #%d, current height: %d", n.address.ToHex(), block.Header.BlockNumber, currentHeight)
+
+	approval := NewBlockApproval(block, n.committee)
+	n.pendingBlocksMu.Lock()
+	n.pendingBlocks[block.Header.Hash] = approval
+	n.pendingBlocksMu.Unlock()
+
+	// Check the buffer for any approvals that arrived early
+	n.approvalBufferMu.Lock()
+	if bufferedApprovals, ok := n.approvalBuffer[block.Header.Hash]; ok {
+		log.Printf("INFO: Node %s found %d buffered approvals for block %s", n.address.ToHex(), len(bufferedApprovals), block.Header.Hash.ToHex())
+		for _, approvalMsg := range bufferedApprovals {
+			// Intentionally not calling processApproval to avoid lock contention
+			if err := approval.AddSignature(approvalMsg.Address, approvalMsg.Signature); err != nil {
+				log.Printf("ERROR: Failed to add buffered approval signature for block %s: %v", approvalMsg.BlockHash.ToHex(), err)
+			}
+		}
+		delete(n.approvalBuffer, block.Header.Hash)
+	}
+	n.approvalBufferMu.Unlock()
+
+	go n.watchBlockApproval(block)
+
+	isCommitteeMember := false
+	for _, v := range n.committee {
+		if v.Address == n.address {
+			isCommitteeMember = true
 			break
 		}
 	}
 
-	// Apply block to state and update participation
-	if err := n.bc.ApplyBlockWithRegistry(&block, n.state, n.vr); err != nil {
-		log.Printf("ERROR: Failed to apply block: %v", err)
+	if isCommitteeMember {
+		log.Printf("INFO: Node %s (committee member) is voting for block #%d", n.address.ToHex(), block.Header.BlockNumber)
+		r, s, err := ecdsa.Sign(rand.Reader, n.privKey, block.Header.Hash[:])
+		if err != nil {
+			log.Printf("ERROR: Failed to sign self-approval: %v", err)
+			n.pendingBlocksMu.Lock()
+			delete(n.pendingBlocks, block.Header.Hash)
+			n.pendingBlocksMu.Unlock()
+			return
+		}
+		sig := append(r.Bytes(), s.Bytes()...)
+		if err := approval.AddSignature(n.address, sig); err != nil {
+			log.Printf("ERROR: Failed to add self-approval: %v", err)
+			n.pendingBlocksMu.Lock()
+			delete(n.pendingBlocks, block.Header.Hash)
+			n.pendingBlocksMu.Unlock()
+			return
+		}
+		log.Printf("INFO: Node %s added self-approval for block %s. Total approvals: %d/%d",
+			n.address.ToHex(), block.Header.Hash.ToHex(), len(approval.Signatures), approval.Threshold)
+
+		// After self-approving, check if the block is ready for finalization.
+		if approval.IsApproved() {
+			go n.finalizeApprovedBlock(block)
+		}
+
+		n.broadcastApproval(block)
+	} else {
+		log.Printf("INFO: Node %s processing block #%d (not in committee, will not vote)",
+			n.address.ToHex(), block.Header.BlockNumber)
 	}
 }
 
 func (n *AppNode) handleApproval(msg *pubsub.Message) {
-	var approval Approval
-	if err := json.Unmarshal(msg.Data, &approval); err != nil {
+	var approvalMsg Approval
+	if err := json.Unmarshal(msg.Data, &approvalMsg); err != nil {
 		log.Printf("ERROR: Failed to decode approval: %v", err)
 		return
 	}
-	log.Printf("INFO: Node %s received approval for block %s from %s", n.address.ToHex(), approval.BlockHash.ToHex(), approval.Address.ToHex())
+	log.Printf("INFO: Node %s received approval for block %s from %s", n.address.ToHex(), approvalMsg.BlockHash.ToHex(), approvalMsg.Address.ToHex())
+	n.processApproval(&approvalMsg)
+}
 
-	n.pendingBlocksMu.Lock()
-	exists := n.pendingBlocks[approval.BlockHash] != nil
-	n.pendingBlocksMu.Unlock()
+func (n *AppNode) processApproval(approvalMsg *Approval) {
+	n.pendingBlocksMu.RLock()
+	approval, exists := n.pendingBlocks[approvalMsg.BlockHash]
+	n.pendingBlocksMu.RUnlock()
+
 	if !exists {
-		// Buffer the approval for later
 		n.approvalBufferMu.Lock()
-		n.approvalBuffer[approval.BlockHash] = append(n.approvalBuffer[approval.BlockHash], &approval)
+		n.approvalBuffer[approvalMsg.BlockHash] = append(n.approvalBuffer[approvalMsg.BlockHash], approvalMsg)
 		n.approvalBufferMu.Unlock()
-		log.Printf("WARN: Node %s buffered approval for unknown block %s.", n.address.ToHex(), approval.BlockHash.ToHex())
+		log.Printf("WARN: Node %s buffered approval for unknown block %s.", n.address.ToHex(), approvalMsg.BlockHash.ToHex())
 		return
 	}
 
-	n.processApproval(&approval)
-}
-
-// processApproval processes an approval for a known block (must be called with ba != nil)
-func (n *AppNode) processApproval(approval *Approval) {
-	n.pendingBlocksMu.Lock()
-	ba, exists := n.pendingBlocks[approval.BlockHash]
-	n.pendingBlocksMu.Unlock()
-	if !exists {
+	if err := approval.AddSignature(approvalMsg.Address, approvalMsg.Signature); err != nil {
+		log.Printf("ERROR: Failed to add approval signature for block %s: %v", approvalMsg.BlockHash.ToHex(), err)
 		return
 	}
+	log.Printf("INFO: Node %s added approval for block %s from %s. Total approvals: %d/%d",
+		n.address.ToHex(), approvalMsg.BlockHash.ToHex(), approvalMsg.Address.ToHex(), len(approval.Signatures), approval.Threshold)
 
-	if ba.IsApproved() {
-		log.Printf("INFO: Node %s noted approval for block %s, but it's already approved.", n.address.ToHex(), approval.BlockHash.ToHex())
-		return // Already approved and processed
-	}
-
-	if err := ba.AddSignature(approval.Address, approval.Signature); err != nil {
-		log.Printf("ERROR: Node %s failed to add signature for block %s: %v", n.address.ToHex(), approval.BlockHash.ToHex(), err)
-		return
-	}
-	log.Printf("INFO: Node %s added approval for block %s from %s. Total approvals: %d/%d", n.address.ToHex(), approval.BlockHash.ToHex(), approval.Address.ToHex(), len(ba.Signatures), ba.Threshold)
-
-	if ba.IsApproved() {
-		log.Printf("SUCCESS: Node %s confirms block %s is now APPROVED!", n.address.ToHex(), ba.Block.Header.Hash.ToHex())
-		if err := n.bc.AddBlock(ba.Block); err != nil {
-			log.Printf("CRITICAL: Node %s failed to add approved block %d to chain: %v", n.address.ToHex(), ba.Block.Header.BlockNumber, err)
-		} else {
-			log.Printf("SUCCESS: Node %s added approved block %d to blockchain.", n.address.ToHex(), ba.Block.Header.BlockNumber)
-			// Clean up pending block
-			n.pendingBlocksMu.Lock()
-			delete(n.pendingBlocks, approval.BlockHash)
-			n.pendingBlocksMu.Unlock()
-		}
+	// If the block is now approved, finalize it immediately.
+	if approval.IsApproved() {
+		go n.finalizeApprovedBlock(approval.Block)
 	}
 }
 
-// watchBlockApproval waits for a block to be approved and cleans it up if it times out.
 func (n *AppNode) watchBlockApproval(block *Block) {
-	select {
-	case <-time.After(250 * time.Millisecond):
-		n.pendingBlocksMu.Lock()
-		defer n.pendingBlocksMu.Unlock()
+	ticker := time.NewTicker(50 * time.Millisecond) // Poll frequently
+	defer ticker.Stop()
 
-		ba, exists := n.pendingBlocks[block.Header.Hash]
-		if !exists {
-			log.Printf("DEBUG: Watchdog for block %s found it was already removed (likely approved).", block.Header.Hash.ToHex())
-			return
-		}
+	timeout := time.After(250 * time.Millisecond)
 
-		if !ba.IsApproved() {
-			log.Printf("WARN: Block #%d from %s timed out without approval on node %s. Removing.", block.Header.BlockNumber, block.Header.Proposer.ToHex(), n.address.ToHex())
+	for {
+		select {
+		case <-timeout:
+			log.Printf("WARN: Timed out waiting for approvals for block %s", block.Header.Hash.ToHex())
+			n.pendingBlocksMu.Lock()
 			delete(n.pendingBlocks, block.Header.Hash)
+			n.pendingBlocksMu.Unlock()
+			return
+		case <-ticker.C:
+			n.pendingBlocksMu.RLock()
+			approval, ok := n.pendingBlocks[block.Header.Hash]
+			n.pendingBlocksMu.RUnlock()
 
-			// --- Inactivity tracking and replacement ---
-			approvers := make(map[Address]bool)
-			for addrHex := range ba.Signatures {
-				for _, v := range n.committee {
-					if v.Address.ToHex() == addrHex {
-						approvers[v.Address] = true
-					}
-				}
-			}
-			for _, v := range n.committee {
-				if !approvers[v.Address] {
-					n.inactivity[v.Address]++
-					if n.inactivity[v.Address] > 1 {
-						log.Printf("INFO: Validator %s is inactive and will be replaced.", v.Address.ToHex())
-						newCommittee, err := ReplaceInactiveValidator(n.committee, v.Address, n.vr)
-						if err != nil {
-							log.Printf("ERROR: could not replace inactive validator %s: %v", v.Address.ToHex(), err)
-						} else {
-							n.committee = newCommittee
-							n.proposerSelector = NewProposerSelectorWithRotation(newCommittee, n.bc.Height(), EpochLength)
-						}
-					}
-				}
+			if !ok {
+				log.Printf("DEBUG: watchBlockApproval exiting because pending block %s was removed", block.Header.Hash.ToHex())
+				return
 			}
 
-			// --- Empty block production on timeout ---
-			if n.proposerSelector != nil {
-				proposer := n.proposerSelector.ProposerForBlock(block.Header.BlockNumber)
-				if proposer != nil && proposer.Address == n.address {
-					log.Printf("INFO: Node %s is producing EMPTY block #%d due to timeout.", n.address.ToHex(), block.Header.BlockNumber)
-					emptyBlock, err := n.bc.CreateBlock([]*Transaction{}, proposer, n.privKey)
-					if err != nil {
-						log.Printf("ERROR: Node %s failed to create empty block: %v", n.address.ToHex(), err)
-						return
-					}
-					blockBytes, err := json.Marshal(emptyBlock)
-					if err != nil {
-						log.Printf("ERROR: Node %s failed to marshal empty block: %v", n.address.ToHex(), err)
-						return
-					}
-					if err := n.p2p.Publish(n.ctx, BlockTopic, blockBytes); err != nil {
-						log.Printf("ERROR: Node %s failed to publish empty block: %v", n.address.ToHex(), err)
-					} else {
-						log.Printf("SUCCESS: Node %s published EMPTY block #%d", n.address.ToHex(), emptyBlock.Header.BlockNumber)
-					}
-				}
+			if approval.IsApproved() {
+				n.finalizeApprovedBlock(block)
+				return // End the watch
 			}
 		}
-	case <-n.ctx.Done():
-		// Node is shutting down.
 	}
 }
-
-// --- Broadcasting ---
 
 func (n *AppNode) BroadcastTransaction(tx *Transaction) error {
-	tx.From = n.address
-	data, err := tx.Encode()
-	if err != nil {
-		return err
+	pubKeyBytes := MarshalPublicKey(&n.privKey.PublicKey)
+	netTx := &NetworkTransaction{
+		Tx:     tx,
+		PubKey: pubKeyBytes,
 	}
-	tx.Hash = sha3.Sum256(data)
-
-	r, s, err := ecdsa.Sign(rand.Reader, n.privKey, tx.Hash[:])
-	if err != nil {
-		return err
-	}
-	tx.R, tx.S = r.Bytes(), s.Bytes()
-
-	netTx := &NetworkTransaction{Tx: tx, PubKey: &n.privKey.PublicKey}
 	txBytes, err := json.Marshal(netTx)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to encode transaction: %w", err)
 	}
-
 	log.Printf("Broadcasting transaction: %s", tx.Hash.ToHex())
-	return n.p2p.Publish(n.ctx, TransactionTopic, txBytes)
+	if err := n.p2p.Publish(n.ctx, TransactionTopic, txBytes); err != nil {
+		return fmt.Errorf("failed to publish transaction: %w", err)
+	}
+	log.Printf("SUCCESS: Transaction %s published successfully", tx.Hash.ToHex())
+	return nil
 }
 
 func (n *AppNode) broadcastApproval(block *Block) {
 	r, s, err := ecdsa.Sign(rand.Reader, n.privKey, block.Header.Hash[:])
 	if err != nil {
-		log.Printf("Failed to sign approval: %v", err)
+		log.Printf("ERROR: Failed to sign approval for broadcast: %v", err)
 		return
 	}
-	sig := append(r.Bytes(), s.Bytes()...)
-
 	approval := &Approval{
 		BlockHash: block.Header.Hash,
 		Address:   n.address,
-		Signature: sig,
+		Signature: append(r.Bytes(), s.Bytes()...),
 	}
 	approvalBytes, err := json.Marshal(approval)
 	if err != nil {
-		log.Printf("Failed to marshal approval: %v", err)
+		log.Printf("ERROR: Failed to marshal approval: %v", err)
 		return
 	}
 	if err := n.p2p.Publish(n.ctx, ApprovalTopic, approvalBytes); err != nil {
-		log.Printf("Failed to publish approval: %v", err)
+		log.Printf("ERROR: Failed to broadcast approval: %v", err)
 	}
 }
-
-// --- Main Loop ---
 
 func (n *AppNode) producerLoop() {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
+	lastBlockRequest := time.Now()
+	blockRequestCooldown := 5 * time.Second
+
 	for {
 		select {
+		case <-n.ctx.Done():
+			return
 		case <-ticker.C:
 			currentHeight := n.bc.Height()
-			if n.committee == nil || currentHeight%EpochLength == 0 {
-				committee, err := (&CommitteeSelector{Registry: n.vr}).SelectCommittee(5)
-				if err != nil {
-					log.Printf("ERROR: Node %s failed to select committee: %v", n.address.ToHex(), err)
-					continue
+			log.Printf("DEBUG: Node %s sees blockchain height: %d", n.address.ToHex(), currentHeight)
+
+			if time.Since(lastBlockRequest) > blockRequestCooldown {
+				if currentHeight == 0 {
+					log.Printf("INFO: Node %s is at height 0, requesting block #1", n.address.ToHex())
+					n.RequestBlock(1)
+					lastBlockRequest = time.Now()
 				}
-				n.committee = committee
-				n.proposerSelector = NewProposerSelectorWithRotation(committee, currentHeight, EpochLength)
-				log.Printf("INFO: Node %s elected new committee for epoch starting at height %d. Committee size: %d", n.address.ToHex(), currentHeight, len(committee))
 			}
 
-			if n.proposerSelector == nil || len(n.proposerSelector.Committee) == 0 {
-				log.Printf("WARN: Node %s has no proposer selector or empty committee. Skipping block production.", n.address.ToHex())
+			n.ForceCommitteeAndProposer()
+			if n.proposerSelector == nil {
+				log.Printf("WARN: Node %s has no proposer selector yet, skipping block production.", n.address.ToHex())
 				continue
 			}
 
-			proposer := n.proposerSelector.ProposerForBlock(currentHeight)
-			if proposer != nil && proposer.Address == n.address {
-				log.Printf("INFO: Node %s IS the proposer. Producing block...", n.address.ToHex())
-				txs := n.txPool.SelectTransactions(10)
-
-				newBlock, err := n.bc.CreateBlock(txs, proposer, n.privKey)
-				if err != nil {
-					log.Printf("ERROR: Node %s failed to create block: %v", n.address.ToHex(), err)
-					continue
-				}
-
-				blockBytes, err := json.Marshal(newBlock)
-				if err != nil {
-					log.Printf("ERROR: Node %s failed to marshal block: %v", n.address.ToHex(), err)
-					continue
-				}
-				log.Printf("INFO: Node %s broadcasting block proposal #%d", n.address.ToHex(), newBlock.Header.BlockNumber)
-				if err := n.p2p.Publish(n.ctx, BlockTopic, blockBytes); err != nil {
-					log.Printf("ERROR: Node %s failed to publish block proposal: %v", n.address.ToHex(), err)
-				} else {
-					log.Printf("SUCCESS: Node %s published block proposal #%d", n.address.ToHex(), newBlock.Header.BlockNumber)
-				}
+			nextBlockHeight := currentHeight + 1
+			proposer := n.proposerSelector.ProposerForBlock(nextBlockHeight)
+			if proposer == nil {
+				log.Printf("WARN: No proposer for block %d", nextBlockHeight)
+				continue
 			}
-		case <-n.ctx.Done():
-			return
+			log.Printf("DEBUG: Proposer for block %d is %s", nextBlockHeight, proposer.Address.ToHex())
+
+			if proposer.Address == n.address {
+				log.Printf("INFO: Node %s IS the proposer for block #%d. Producing block...", n.address.ToHex(), nextBlockHeight)
+				txs := n.txPool.SelectTransactions(10, n.state)
+				log.Printf("INFO: Node %s including %d transactions in block #%d", n.address.ToHex(), len(txs), nextBlockHeight)
+
+				for _, tx := range txs {
+					n.txPool.MarkTransactionAsUsed(tx.Hash)
+				}
+
+				lastBlock, err := n.bc.GetLastBlock()
+				if err != nil {
+					log.Printf("ERROR: Failed to get last block: %v", err)
+					continue
+				}
+
+				// Calculate total gas fees from transactions
+				var totalGas uint64
+				for _, tx := range txs {
+					totalGas += tx.Fee
+				}
+
+				header := &Header{
+					BlockNumber:     nextBlockHeight,
+					PreviousHash:    lastBlock.Header.Hash,
+					Timestamp:       time.Now().UnixNano(),
+					Proposer:        n.address,
+					TransactionRoot: computeTransactionRoot(txs),
+					Gas:             totalGas, // Set the calculated gas
+				}
+				hash, err := header.ComputeHash()
+				if err != nil {
+					log.Printf("ERROR: Failed to compute header hash: %v", err)
+					continue
+				}
+				header.Hash = hash
+
+				block := NewBlock(header, txs)
+				block.ValidatorList = n.committee // Set the current committee
+				if err := block.Sign(n.privKey); err != nil {
+					log.Printf("ERROR: Failed to sign new block: %v", err)
+					continue
+				}
+
+				blockBytes, err := json.Marshal(block)
+				if err != nil {
+					log.Printf("ERROR: Failed to marshal block: %v", err)
+					continue
+				}
+
+				if err := n.p2p.Publish(n.ctx, BlockTopic, blockBytes); err != nil {
+					log.Printf("ERROR: Failed to publish block proposal: %v", err)
+				} else {
+					log.Printf("SUCCESS: Node %s published block proposal #%d", n.address.ToHex(), nextBlockHeight)
+				}
+				n.processReceivedBlock(block)
+			}
 		}
 	}
 }
 
 func (n *AppNode) ForceCommitteeAndProposer() {
 	currentHeight := n.bc.Height()
-	committee, err := (&CommitteeSelector{Registry: n.vr}).SelectCommittee(5)
-	if err != nil {
-		log.Printf("ERROR: Node %s failed to select committee: %v", n.address.ToHex(), err)
+	epoch := currentHeight / EpochLength
+	epochStartHeight := epoch * EpochLength
+
+	// Do not re-calculate for the same epoch
+	if n.proposerSelector != nil && n.proposerSelector.EpochStart == epochStartHeight {
 		return
 	}
-	n.committee = committee
-	n.proposerSelector = NewProposerSelectorWithRotation(committee, currentHeight, EpochLength)
-	log.Printf("INFO: Node %s (force) elected committee for epoch starting at height %d. Committee size: %d", n.address.ToHex(), currentHeight, len(committee))
+
+	newCommittee, err := n.committeeSelector.SelectCommittee(CommitteeSize)
+	if err != nil {
+		log.Printf("ERROR: Failed to get committee for epoch %d: %v", epoch, err)
+		return
+	}
+	if len(newCommittee) == 0 {
+		log.Printf("WARN: No validators found for epoch %d, cannot form committee.", epoch)
+		return
+	}
+	n.committee = newCommittee
+	if TestSyncCommittee != nil {
+		TestSyncCommittee(newCommittee)
+	}
+
+	n.proposerSelector = NewProposerSelectorWithRotation(newCommittee, epochStartHeight, EpochLength)
+	log.Printf("INFO: Node %s elected new committee for epoch starting at height %d. Committee size: %d", n.address.ToHex(), epochStartHeight, len(n.committee))
 }
 
-// ReplaceInactiveValidator removes an inactive validator from the committee and adds a new one from the registry.
 func ReplaceInactiveValidator(committee []*Validator, inactiveAddress Address, vr *ValidatorRegistry) ([]*Validator, error) {
-	// Find and remove the inactive validator
-	newCommittee := make([]*Validator, 0, len(committee)-1)
-	for _, v := range committee {
-		if v.Address != inactiveAddress {
-			newCommittee = append(newCommittee, v)
+	log.Printf("INFO: Replacing inactive validator %s", inactiveAddress.ToHex())
+
+	// Get all validators from registry
+	allValidators, err := vr.GetAllValidators()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all validators: %w", err)
+	}
+
+	// Create a map of current committee members for quick lookup
+	committeeMap := make(map[Address]bool)
+	for _, member := range committee {
+		committeeMap[member.Address] = true
+	}
+
+	// Find participating validators not in the current committee
+	var candidates []*Validator
+	for _, v := range allValidators {
+		if v.Participating && !committeeMap[v.Address] && v.Address != inactiveAddress {
+			candidates = append(candidates, v)
 		}
 	}
 
-	// Select a new validator from the registry
-	allValidators, err := vr.ListValidators()
-	if err != nil {
-		return nil, fmt.Errorf("failed to list validators: %w", err)
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no participating validators available to replace inactive validator %s", inactiveAddress.ToHex())
 	}
 
-	// Create a lookup map of validators already in the new committee
-	inCommittee := make(map[Address]bool)
-	for _, v := range newCommittee {
-		inCommittee[v.Address] = true
-	}
+	// Sort candidates by weight (stake + delegated stake + reputation) descending
+	sort.Slice(candidates, func(i, j int) bool {
+		weightI := candidates[i].Stake + candidates[i].DelegatedStake + candidates[i].ComputeReputation
+		weightJ := candidates[j].Stake + candidates[j].DelegatedStake + candidates[j].ComputeReputation
+		if weightI == weightJ {
+			// For determinism, sort by address if weights are equal
+			return bytes.Compare(candidates[i].Address[:], candidates[j].Address[:]) < 0
+		}
+		return weightI > weightJ
+	})
 
-	// Find a replacement that is not already in the committee
-	var newValidator *Validator
-	for _, val := range allValidators {
-		if !inCommittee[val.Address] {
-			newValidator = val
+	// Select the highest weighted candidate
+	replacement := candidates[0]
+
+	// Create new committee with the replacement
+	newCommittee := make([]*Validator, len(committee))
+	copy(newCommittee, committee)
+
+	// Replace the inactive validator
+	for i, member := range newCommittee {
+		if member.Address == inactiveAddress {
+			newCommittee[i] = replacement
+			log.Printf("INFO: Replaced inactive validator %s with %s (weight: %d)",
+				inactiveAddress.ToHex(), replacement.Address.ToHex(),
+				replacement.Stake+replacement.DelegatedStake+replacement.ComputeReputation)
 			break
 		}
 	}
 
-	if newValidator == nil {
-		return nil, fmt.Errorf("no valid validator found to replace %s", inactiveAddress.ToHex())
+	return newCommittee, nil
+}
+
+type BlockRequest struct {
+	Height uint64  `json:"height"`
+	From   Address `json:"from"`
+}
+
+type BlockResponse struct {
+	Block *Block  `json:"block"`
+	From  Address `json:"from"`
+}
+
+func (n *AppNode) handleBlockRequest(msg *pubsub.Message) {
+	var request BlockRequest
+	if err := json.Unmarshal(msg.Data, &request); err != nil {
+		log.Printf("ERROR: Failed to decode block request: %v", err)
+		return
 	}
 
-	newCommittee = append(newCommittee, newValidator)
-	return newCommittee, nil
+	if request.From == n.address {
+		return
+	}
+
+	log.Printf("INFO: Node %s received block request for height %d from %s",
+		n.address.ToHex(), request.Height, request.From.ToHex())
+
+	block, err := n.bc.GetBlockByHeight(request.Height)
+	if err != nil {
+		log.Printf("DEBUG: Node %s doesn't have block #%d", n.address.ToHex(), request.Height)
+		return
+	}
+
+	response := &BlockResponse{
+		Block: block,
+		From:  n.address,
+	}
+	responseBytes, err := json.Marshal(response)
+	if err != nil {
+		log.Printf("ERROR: Failed to marshal block response: %v", err)
+		return
+	}
+
+	log.Printf("INFO: Node %s sending block #%d to %s", n.address.ToHex(), request.Height, request.From.ToHex())
+	if err := n.p2p.Publish(n.ctx, BlockResponseTopic, responseBytes); err != nil {
+		log.Printf("ERROR: Failed to publish block response: %v", err)
+	}
+}
+
+func (n *AppNode) handleBlockResponse(msg *pubsub.Message) {
+	var response BlockResponse
+	if err := json.Unmarshal(msg.Data, &response); err != nil {
+		log.Printf("ERROR: Failed to decode block response: %v", err)
+		return
+	}
+
+	if response.From == n.address {
+		return
+	}
+
+	log.Printf("INFO: Node %s received block response for block #%d from %s",
+		n.address.ToHex(), response.Block.Header.BlockNumber, response.From.ToHex())
+
+	n.processReceivedBlock(response.Block)
+}
+
+func (n *AppNode) RequestBlock(height uint64) {
+	request := &BlockRequest{
+		Height: height,
+		From:   n.address,
+	}
+
+	requestBytes, err := json.Marshal(request)
+	if err != nil {
+		log.Printf("ERROR: Failed to marshal block request: %v", err)
+		return
+	}
+
+	log.Printf("INFO: Node %s requesting block #%d", n.address.ToHex(), height)
+	if err := n.p2p.Publish(n.ctx, BlockRequestTopic, requestBytes); err != nil {
+		log.Printf("ERROR: Failed to publish block request: %v", err)
+	}
+}
+
+func (n *AppNode) finalizeApprovedBlock(block *Block) {
+	// Atomically check and remove the block from pending to "claim" it for finalization.
+	n.pendingBlocksMu.Lock()
+	_, ok := n.pendingBlocks[block.Header.Hash]
+	if !ok {
+		// Block was already finalized by another goroutine.
+		n.pendingBlocksMu.Unlock()
+		return
+	}
+	delete(n.pendingBlocks, block.Header.Hash)
+	n.pendingBlocksMu.Unlock()
+
+	log.Printf("SUCCESS: Node %s confirms block %s is now APPROVED!", n.address.ToHex(), block.Header.Hash.ToHex())
+	if err := n.bc.AddBlock(block); err != nil {
+		log.Printf("CRITICAL: Failed to add approved block %d to blockchain: %v", block.Header.BlockNumber, err)
+		// If adding fails, we've already "claimed" it, so other nodes won't retry.
+		// This is a critical state. For now, we just log and halt processing for this block.
+		return
+	}
+	log.Printf("SUCCESS: Node %s added approved block %d to blockchain.", n.address.ToHex(), block.Header.BlockNumber)
+	if err := n.bc.ApplyBlockWithRegistry(block, n.state, n.vr); err != nil {
+		log.Printf("ERROR: Failed to apply block transactions to state: %v", err)
+		return
+	}
+	log.Printf("SUCCESS: Node %s applied block %d transactions to state.", n.address.ToHex(), block.Header.BlockNumber)
+	for _, tx := range block.Transactions {
+		n.txPool.RemoveTransaction(tx.Hash)
+	}
+}
+
+func (n *AppNode) broadcastValidatorRegistration() {
+	// Wait a bit for connections to be established
+	time.Sleep(3 * time.Second)
+
+	// Send initial registration
+	n.sendValidatorRegistration()
+
+	// Send periodic registrations
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-ticker.C:
+			n.sendValidatorRegistration()
+		}
+	}
+}
+
+func (n *AppNode) sendValidatorRegistration() {
+	// Get our validator info
+	validator, err := n.vr.GetValidator(n.address)
+	if err != nil || validator == nil {
+		log.Printf("ERROR: Failed to get local validator info: %v", err)
+		return
+	}
+
+	validatorRegistration := &ValidatorRegistration{
+		Address: n.address,
+		Stake:   validator.Stake,
+	}
+	registrationBytes, err := json.Marshal(validatorRegistration)
+	if err != nil {
+		log.Printf("ERROR: Failed to marshal validator registration: %v", err)
+		return
+	}
+	if err := n.p2p.Publish(n.ctx, ValidatorTopic, registrationBytes); err != nil {
+		log.Printf("ERROR: Failed to broadcast validator registration: %v", err)
+	} else {
+		log.Printf("DEBUG: Broadcast validator registration for %s with stake %d", n.address.ToHex(), validator.Stake)
+	}
+}
+
+func (n *AppNode) handleValidatorRegistration(msg *pubsub.Message) {
+	var registration ValidatorRegistration
+	if err := json.Unmarshal(msg.Data, &registration); err != nil {
+		log.Printf("ERROR: Failed to decode validator registration: %v", err)
+		return
+	}
+	log.Printf("INFO: Node %s received validator registration for %s with stake %d", n.address.ToHex(), registration.Address.ToHex(), registration.Stake)
+
+	// Register the validator in the registry
+	if err := n.vr.RegisterValidator(&Validator{
+		Address:       registration.Address,
+		Stake:         registration.Stake,
+		Participating: true,
+	}); err != nil {
+		log.Printf("ERROR: Failed to register validator: %v", err)
+	} else {
+		log.Printf("INFO: Node %s registered validator %s with stake %d", n.address.ToHex(), registration.Address.ToHex(), registration.Stake)
+		// Force committee re-selection to include the new validator
+		n.ForceCommitteeAndProposer()
+		// Initialize the account for the new validator if it doesn't exist or has zero balance
+		acc, _ := n.state.GetAccount(registration.Address)
+		if acc.Balance == 0 {
+			acc.Balance = 1000
+			if err := n.state.PutAccount(acc); err != nil {
+				log.Printf("ERROR: Failed to set initial balance for validator %s: %v", registration.Address.ToHex(), err)
+			}
+			log.Printf("INFO: Initialized account for validator %s with balance 1000 (on registration)", registration.Address.ToHex())
+		}
+	}
+}
+
+func (n *AppNode) addTestTransactions() {
+	// Wait for the network to be ready
+	time.Sleep(5 * time.Second)
+
+	// Create a test recipient address (different from our own)
+	testRecipient := Address{}
+	copy(testRecipient[:], []byte("test_recipient_address"))
+
+	// Create different types of test transactions
+	transactions := []struct {
+		to     Address
+		value  uint64
+		nonce  uint64
+		txType string
+	}{
+		{testRecipient, 10, 1, "transfer"},
+		{testRecipient, 25, 2, "transfer"},
+		{testRecipient, 50, 3, "transfer"},
+		{testRecipient, 100, 4, "transfer"},
+		{testRecipient, 200, 5, "transfer"},
+	}
+
+	// Create and broadcast transactions
+	for i, txData := range transactions {
+		tx := &Transaction{
+			From:      n.address,
+			To:        txData.to,
+			Value:     txData.value,
+			Nonce:     txData.nonce,
+			Fee:       1,
+			Timestamp: time.Now().UnixNano(),
+			Type:      txData.txType,
+		}
+
+		// Sign the transaction
+		if err := tx.Sign(n.privKey); err != nil {
+			log.Printf("ERROR: Failed to sign test transaction: %v", err)
+			continue
+		}
+
+		// Broadcast the transaction
+		if err := n.BroadcastTransaction(tx); err != nil {
+			log.Printf("ERROR: Failed to broadcast test transaction: %v", err)
+		} else {
+			log.Printf("INFO: Broadcast test transaction %d with hash %s (value: %d)", i, tx.Hash.ToHex(), txData.value)
+		}
+
+		// Wait a bit between transactions
+		time.Sleep(1 * time.Second)
+	}
+
+	// Add some delegation transactions if we have other validators
+	validators, err := n.vr.GetAllValidators()
+	if err == nil && len(validators) > 1 {
+		log.Printf("INFO: Creating delegation transactions...")
+
+		// Find another validator to delegate to
+		for _, v := range validators {
+			if v.Address != n.address {
+				// Create delegation transaction
+				delegationTx := &Transaction{
+					From:      n.address,
+					To:        v.Address,
+					Value:     50, // Delegate 50 tokens
+					Nonce:     6,
+					Fee:       1,
+					Timestamp: time.Now().UnixNano(),
+					Type:      "delegate",
+				}
+
+				if err := delegationTx.Sign(n.privKey); err != nil {
+					log.Printf("ERROR: Failed to sign delegation transaction: %v", err)
+					continue
+				}
+
+				if err := n.BroadcastTransaction(delegationTx); err != nil {
+					log.Printf("ERROR: Failed to broadcast delegation transaction: %v", err)
+				} else {
+					log.Printf("INFO: Broadcast delegation transaction to %s with hash %s", v.Address.ToHex(), delegationTx.Hash.ToHex())
+				}
+				break
+			}
+		}
+	}
 }

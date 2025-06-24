@@ -10,16 +10,19 @@ import (
 	"go.etcd.io/bbolt"
 )
 
-// Global database connection pool to prevent multiple connections to the same file
-var (
-	dbConnections = make(map[string]*bbolt.DB)
-	dbMutex       sync.RWMutex
-)
-
 // MemoryStore is an in-memory key-value store for blocks and other data.
 type MemoryStore struct {
 	lock sync.RWMutex
 	data map[string][]byte
+}
+
+// Storage is a generic interface for a key-value store.
+type Storage interface {
+	Put(key, value []byte) error
+	Get(key []byte) ([]byte, error)
+	Delete(key []byte) error
+	Close() error
+	List() (map[string][]byte, error)
 }
 
 // NewMemoryStore creates a new in-memory store.
@@ -48,9 +51,29 @@ func (s *MemoryStore) Get(key []byte) ([]byte, error) {
 	return value, nil
 }
 
-// Add Close method to MemoryStore
+// Delete removes a key-value pair from the store.
+func (s *MemoryStore) Delete(key []byte) error {
+	s.lock.Lock()
+	defer s.lock.Unlock()
+	delete(s.data, string(key))
+	return nil
+}
+
+// Close is a no-op for the in-memory store.
 func (s *MemoryStore) Close() error {
 	return nil
+}
+
+// List returns all key-value pairs from the memory store.
+func (s *MemoryStore) List() (map[string][]byte, error) {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+	// Return a copy to prevent external modifications
+	dataCopy := make(map[string][]byte)
+	for k, v := range s.data {
+		dataCopy[k] = v
+	}
+	return dataCopy, nil
 }
 
 // BoltStore provides a simple key-value store using BoltDB.
@@ -60,17 +83,8 @@ type BoltStore struct {
 	bucketName string
 }
 
-// getOrCreateDBConnection returns an existing database connection or creates a new one
-func getOrCreateDBConnection(path string) (*bbolt.DB, error) {
-	dbMutex.Lock()
-	defer dbMutex.Unlock()
-
-	// Check if we already have a connection to this database
-	if db, exists := dbConnections[path]; exists {
-		log.Printf("Reusing existing database connection for %s", path)
-		return db, nil
-	}
-
+// NewBoltStore creates or opens a BoltDB database at the given path and bucket.
+func NewBoltStore(path, bucketName string) (*BoltStore, error) {
 	// Check if file exists and log for debugging
 	if _, err := os.Stat(path); err == nil {
 		log.Printf("Database file %s already exists", path)
@@ -82,7 +96,7 @@ func getOrCreateDBConnection(path string) (*bbolt.DB, error) {
 
 	// Create new database connection
 	db, err := bbolt.Open(path, 0600, &bbolt.Options{
-		Timeout:      10 * time.Second,
+		Timeout:      1 * time.Second, // Reduced timeout
 		NoGrowSync:   false,
 		FreelistType: bbolt.FreelistArrayType,
 	})
@@ -91,19 +105,6 @@ func getOrCreateDBConnection(path string) (*bbolt.DB, error) {
 	}
 
 	log.Printf("Successfully opened database at %s", path)
-
-	// Store the connection in our pool
-	dbConnections[path] = db
-
-	return db, nil
-}
-
-// NewBoltStore creates or opens a BoltDB database at the given path and bucket.
-func NewBoltStore(path, bucketName string) (*BoltStore, error) {
-	db, err := getOrCreateDBConnection(path)
-	if err != nil {
-		return nil, err
-	}
 
 	// Ensure the requested bucket exists
 	err = db.Update(func(tx *bbolt.Tx) error {
@@ -115,6 +116,8 @@ func NewBoltStore(path, bucketName string) (*BoltStore, error) {
 		return nil
 	})
 	if err != nil {
+		// If bucket creation fails, close the database before returning the error
+		db.Close()
 		return nil, fmt.Errorf("failed to initialize bucket %s: %w", bucketName, err)
 	}
 	return &BoltStore{db: db, path: path, bucketName: bucketName}, nil
@@ -122,23 +125,11 @@ func NewBoltStore(path, bucketName string) (*BoltStore, error) {
 
 // Close closes the database connection.
 func (s *BoltStore) Close() error {
-	// Don't actually close the database here since it might be shared
-	// The database will be closed when the application shuts down
-	return nil
-}
-
-// CloseAllDBConnections closes all database connections (call this on application shutdown)
-func CloseAllDBConnections() {
-	dbMutex.Lock()
-	defer dbMutex.Unlock()
-
-	for path, db := range dbConnections {
-		log.Printf("Closing database connection for %s", path)
-		if err := db.Close(); err != nil {
-			log.Printf("Error closing database %s: %v", path, err)
-		}
+	log.Printf("Closing database connection for %s", s.path)
+	if s.db != nil {
+		return s.db.Close()
 	}
-	dbConnections = make(map[string]*bbolt.DB)
+	return nil
 }
 
 // Put saves a key-value pair in the store's bucket.
@@ -163,7 +154,24 @@ func (s *BoltStore) Get(key []byte) ([]byte, error) {
 		value = b.Get(key)
 		return nil
 	})
-	return value, err
+	if err != nil {
+		return nil, err
+	}
+	if value == nil {
+		return nil, fmt.Errorf("key not found: %s", key)
+	}
+	return value, nil
+}
+
+// Delete removes a key-value pair from the store's bucket.
+func (s *BoltStore) Delete(key []byte) error {
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(s.bucketName))
+		if b == nil {
+			return fmt.Errorf("bucket %s not found", s.bucketName)
+		}
+		return b.Delete(key)
+	})
 }
 
 // List retrieves all key-value pairs from the store's bucket.
@@ -175,7 +183,12 @@ func (s *BoltStore) List() (map[string][]byte, error) {
 			return fmt.Errorf("bucket %s not found", s.bucketName)
 		}
 		return b.ForEach(func(k, v []byte) error {
-			values[string(k)] = v
+			// Create copies of the key and value to ensure they are safe to use after the transaction.
+			keyCopy := make([]byte, len(k))
+			copy(keyCopy, k)
+			valueCopy := make([]byte, len(v))
+			copy(valueCopy, v)
+			values[string(keyCopy)] = valueCopy
 			return nil
 		})
 	})

@@ -197,6 +197,139 @@ case "${1:-help}" in
         echo "Check logs/node_9000.log and logs/node_9001.log for details"
         ;;
         
+    "test-multi")
+        print_header "Running Multi-Node Network Tests"
+        
+        # Start a 4-node network
+        print_status "Starting test network with 4 nodes..."
+        start_node 9000 "" "Test-Bootstrap"
+        sleep 5
+        
+        # Get the bootstrap node's peer ID
+        peer_id=$(grep 'Node started with ID' logs/node_9000.log | head -1 | awk '{print $NF}')
+        if [ -z "$peer_id" ]; then
+            print_error "Could not get bootstrap node peer ID"
+            exit 1
+        fi
+        
+        start_node 9001 "/ip4/127.0.0.1/tcp/9000/p2p/$peer_id" "Test-Node-1"
+        start_node 9002 "/ip4/127.0.0.1/tcp/9000/p2p/$peer_id" "Test-Node-2"
+        start_node 9003 "/ip4/127.0.0.1/tcp/9000/p2p/$peer_id" "Test-Node-3"
+        
+        print_status "Multi-node test network started. Let it run for 45 seconds..."
+        sleep 45
+        
+        print_status "Multi-node test completed. Stopping nodes..."
+        cleanup
+        
+        print_status "Test results:"
+        echo "Check logs/node_9000.log through logs/node_9003.log for details"
+        ;;
+        
+    "test-scenarios")
+        print_header "Running Complex Scenario Tests"
+        
+        # Scenario 1: 5-node network with staggered startup
+        print_status "Scenario 1: 5-node network with staggered startup..."
+        start_node 9000 "" "Scenario-Bootstrap"
+        sleep 3
+        
+        peer_id=$(grep 'Node started with ID' logs/node_9000.log | head -1 | awk '{print $NF}')
+        if [ -z "$peer_id" ]; then
+            print_error "Could not get bootstrap node peer ID"
+            exit 1
+        fi
+        
+        start_node 9001 "/ip4/127.0.0.1/tcp/9000/p2p/$peer_id" "Scenario-Node-1"
+        sleep 2
+        start_node 9002 "/ip4/127.0.0.1/tcp/9000/p2p/$peer_id" "Scenario-Node-2"
+        sleep 2
+        start_node 9003 "/ip4/127.0.0.1/tcp/9000/p2p/$peer_id" "Scenario-Node-3"
+        sleep 2
+        start_node 9004 "/ip4/127.0.0.1/tcp/9000/p2p/$peer_id" "Scenario-Node-4"
+        
+        print_status "5-node scenario network started. Let it run for 60 seconds..."
+        sleep 60
+        
+        print_status "Scenario test completed. Stopping nodes..."
+        cleanup
+        
+        print_status "Scenario test results:"
+        echo "Check logs/node_9000.log through logs/node_9004.log for details"
+        ;;
+        
+    "test-stress")
+        print_header "Running Stress Tests"
+        
+        # Stress test with 6 nodes
+        print_status "Starting stress test with 6 nodes..."
+        start_node 9000 "" "Stress-Bootstrap"
+        sleep 3
+        
+        peer_id=$(grep 'Node started with ID' logs/node_9000.log | head -1 | awk '{print $NF}')
+        if [ -z "$peer_id" ]; then
+            print_error "Could not get bootstrap node peer ID"
+            exit 1
+        fi
+        
+        # Start all nodes quickly
+        for i in {1..5}; do
+            port=$((9000 + i))
+            start_node $port "/ip4/127.0.0.1/tcp/9000/p2p/$peer_id" "Stress-Node-$i"
+        done
+        
+        print_status "Stress test network started. Let it run for 90 seconds..."
+        sleep 90
+        
+        print_status "Stress test completed. Stopping nodes..."
+        cleanup
+        
+        print_status "Stress test results:"
+        echo "Check logs/node_9000.log through logs/node_9005.log for details"
+        ;;
+        
+    "test-resilience")
+        print_header "Running Resilience Tests"
+        
+        # Test network resilience with node failures
+        print_status "Starting resilience test with 4 nodes..."
+        start_node 9000 "" "Resilience-Bootstrap"
+        sleep 3
+        
+        peer_id=$(grep 'Node started with ID' logs/node_9000.log | head -1 | awk '{print $NF}')
+        if [ -z "$peer_id" ]; then
+            print_error "Could not get bootstrap node peer ID"
+            exit 1
+        fi
+        
+        start_node 9001 "/ip4/127.0.0.1/tcp/9000/p2p/$peer_id" "Resilience-Node-1"
+        start_node 9002 "/ip4/127.0.0.1/tcp/9000/p2p/$peer_id" "Resilience-Node-2"
+        start_node 9003 "/ip4/127.0.0.1/tcp/9000/p2p/$peer_id" "Resilience-Node-3"
+        
+        print_status "Network started. Let it stabilize for 20 seconds..."
+        sleep 20
+        
+        print_status "Simulating node failure: stopping node on port 9002..."
+        stop_node 9002
+        sleep 10
+        
+        print_status "Network running with failed node for 15 seconds..."
+        sleep 15
+        
+        print_status "Restarting failed node..."
+        start_node 9002 "/ip4/127.0.0.1/tcp/9000/p2p/$peer_id" "Resilience-Node-2-Restarted"
+        sleep 10
+        
+        print_status "Network running with recovered node for 15 seconds..."
+        sleep 15
+        
+        print_status "Resilience test completed. Stopping all nodes..."
+        cleanup
+        
+        print_status "Resilience test results:"
+        echo "Check logs/node_9000.log through logs/node_9003.log for details"
+        ;;
+        
     "clean")
         print_header "Cleaning Up"
         cleanup
@@ -215,6 +348,10 @@ case "${1:-help}" in
         echo "  status            - Check node status"
         echo "  logs <port>       - Show logs for specific node"
         echo "  test              - Run a quick test with 2 nodes"
+        echo "  test-multi        - Run a multi-node test"
+        echo "  test-scenarios    - Run complex scenario tests"
+        echo "  test-stress       - Run stress tests"
+        echo "  test-resilience   - Run resilience tests"
         echo "  clean             - Clean up all files and processes"
         echo "  help              - Show this help"
         echo ""
@@ -223,5 +360,9 @@ case "${1:-help}" in
         echo "  $0 start multi    # Start 4-node network"
         echo "  $0 logs 9000      # Show logs for node on port 9000"
         echo "  $0 test           # Run quick test"
+        echo "  $0 test-multi     # Run multi-node test"
+        echo "  $0 test-scenarios # Run complex scenario tests"
+        echo "  $0 test-stress    # Run stress tests"
+        echo "  $0 test-resilience # Run resilience tests"
         ;;
 esac 

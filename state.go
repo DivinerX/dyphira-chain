@@ -20,7 +20,8 @@ func NewState() *State {
 func (s *State) GetAccount(addr Address) (*Account, error) {
 	data, found := s.Trie.Get(addr[:])
 	if !found {
-		return nil, errors.New("account not found")
+		// Return a new account with 0 balance and nonce 0
+		return &Account{Address: addr, Balance: 0, Nonce: 0}, nil
 	}
 	var acc Account
 	if err := json.Unmarshal(data, &acc); err != nil {
@@ -50,32 +51,53 @@ func (s *State) ApplyTransaction(tx *Transaction) error {
 		return fmt.Errorf("invalid nonce. got %d, want %d", tx.Nonce, sender.Nonce+1)
 	}
 
-	if tx.Value > sender.Balance {
+	if tx.Value+tx.Fee > sender.Balance {
 		return errors.New("insufficient balance")
 	}
 
-	// Participation transaction logic
-	if tx.Type == "participation" {
-		// Mark validator as participating
+	// Handle different transaction types
+	switch tx.Type {
+	case "participation":
+		// Participation transaction logic - handled in block application
 		if s.Trie != nil {
 			// We'll update the ValidatorRegistry in the block application logic
 		}
+	case "register_validator":
+		// Validator registration - stake is locked from sender's balance
+		// The actual registration happens in block application
+		if tx.Value == 0 {
+			return errors.New("validator registration requires non-zero stake")
+		}
+	case "delegate":
+		// Delegation - stake is transferred from delegator to validator
+		// The actual delegation happens in block application
+		if tx.Value == 0 {
+			return errors.New("delegation requires non-zero amount")
+		}
+	case "transfer":
+		// Standard transfer - handled below
+	default:
+		return fmt.Errorf("unknown transaction type: %s", tx.Type)
 	}
 
-	sender.Balance -= tx.Value
+	sender.Balance -= (tx.Value + tx.Fee)
 	sender.Nonce += 1
 
-	toAcc, _ := s.GetAccount(tx.To)
-	if toAcc == nil {
-		// If the recipient doesn't exist, create a new account.
-		toAcc = &Account{Address: tx.To, Balance: 0, Nonce: 0}
+	// For transfer transactions, update recipient balance
+	if tx.Type == "transfer" {
+		toAcc, _ := s.GetAccount(tx.To)
+		if toAcc == nil {
+			// If the recipient doesn't exist, create a new account.
+			toAcc = &Account{Address: tx.To, Balance: 0, Nonce: 0}
+		}
+		toAcc.Balance += tx.Value
+
+		if err := s.PutAccount(toAcc); err != nil {
+			return err
+		}
 	}
-	toAcc.Balance += tx.Value
 
 	if err := s.PutAccount(sender); err != nil {
-		return err
-	}
-	if err := s.PutAccount(toAcc); err != nil {
 		return err
 	}
 	return nil

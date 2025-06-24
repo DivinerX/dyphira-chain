@@ -2,16 +2,15 @@ package main
 
 import (
 	"encoding/json"
-
-	"go.etcd.io/bbolt"
+	"strings"
 )
 
 type ValidatorRegistry struct {
-	store  IBlockStore
+	store  Storage
 	bucket string
 }
 
-func NewValidatorRegistry(store IBlockStore, bucket string) *ValidatorRegistry {
+func NewValidatorRegistry(store Storage, bucket string) *ValidatorRegistry {
 	return &ValidatorRegistry{store: store, bucket: bucket}
 }
 
@@ -22,9 +21,6 @@ func (vr *ValidatorRegistry) validatorKey(addr Address) []byte {
 func (vr *ValidatorRegistry) RegisterValidator(v *Validator) error {
 	if v == nil {
 		return nil
-	}
-	if !v.Participating {
-		v.Participating = false
 	}
 	key := vr.validatorKey(v.Address)
 	data, err := json.Marshal(v)
@@ -38,7 +34,15 @@ func (vr *ValidatorRegistry) GetValidator(addr Address) (*Validator, error) {
 	key := vr.validatorKey(addr)
 	data, err := vr.store.Get(key)
 	if err != nil {
+		// If the error indicates the key was not found, return nil for both.
+		// This is a common pattern to distinguish "not found" from other errors.
+		if strings.Contains(err.Error(), "not found") {
+			return nil, nil
+		}
 		return nil, err
+	}
+	if data == nil {
+		return nil, nil // Not found
 	}
 	var v Validator
 	if err := json.Unmarshal(data, &v); err != nil {
@@ -56,10 +60,13 @@ func (vr *ValidatorRegistry) UpdateStake(addr Address, stake uint64) error {
 	return vr.RegisterValidator(v)
 }
 
-func (vr *ValidatorRegistry) DelegateStake(addr Address, amount uint64) error {
-	v, err := vr.GetValidator(addr)
+func (vr *ValidatorRegistry) DelegateStake(delegator, validator Address, amount uint64) error {
+	v, err := vr.GetValidator(validator)
 	if err != nil {
 		return err
+	}
+	if v == nil {
+		return err // Or a more specific error like "validator not found"
 	}
 	v.DelegatedStake += amount
 	return vr.RegisterValidator(v)
@@ -74,36 +81,42 @@ func (vr *ValidatorRegistry) UpdateReputation(addr Address, rep uint64) error {
 	return vr.RegisterValidator(v)
 }
 
-// ListValidators returns all registered validators.
-func (vr *ValidatorRegistry) ListValidators() ([]*Validator, error) {
+// GetAllValidators returns all registered validators.
+func (vr *ValidatorRegistry) GetAllValidators() ([]*Validator, error) {
 	var validators []*Validator
-	// For BoltStore, we need to iterate over all keys with prefix "validator_"
-	if bs, ok := vr.store.(*BoltStore); ok {
-		err := bs.db.View(func(tx *bbolt.Tx) error {
-			b := tx.Bucket([]byte("validators"))
-			return b.ForEach(func(k, v []byte) error {
-				if len(k) >= 10 && string(k[:10]) == "validator_" {
-					var val Validator
-					if err := json.Unmarshal(v, &val); err == nil {
-						validators = append(validators, &val)
-					}
-				}
-				return nil
-			})
-		})
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		// MemoryStore fallback
-		for k, v := range vr.store.(*MemoryStore).data {
-			if len(k) >= 10 && k[:10] == "validator_" {
-				var val Validator
-				if err := json.Unmarshal(v, &val); err == nil {
-					validators = append(validators, &val)
-				}
+	allData, err := vr.store.List()
+	if err != nil {
+		return nil, err
+	}
+
+	prefix := "validator_"
+	for key, data := range allData {
+		if strings.HasPrefix(key, prefix) {
+			var v Validator
+			if err := json.Unmarshal(data, &v); err != nil {
+				// Log or handle corrupted data
+				continue
 			}
+			validators = append(validators, &v)
 		}
 	}
 	return validators, nil
+}
+
+// ClearAllValidators removes all validators from the registry.
+func (vr *ValidatorRegistry) ClearAllValidators() error {
+	allData, err := vr.store.List()
+	if err != nil {
+		return err
+	}
+
+	prefix := "validator_"
+	for key := range allData {
+		if strings.HasPrefix(key, prefix) {
+			if err := vr.store.Delete([]byte(key)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

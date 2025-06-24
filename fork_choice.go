@@ -42,7 +42,7 @@ type ForkChoice struct {
 func (fc *ForkChoice) SelectHead() (Hash, error) {
 	// Tally votes for each block hash
 	weightMap := make(map[Hash]uint64)
-	validators, err := fc.Registry.ListValidators()
+	validators, err := fc.Registry.GetAllValidators()
 	if err != nil {
 		return Hash{}, err
 	}

@@ -36,6 +36,7 @@ func TestBoltStore(t *testing.T) {
 
 	store, err := NewBoltStore(tmpfile, "bolt")
 	assert.Nil(t, err)
+	defer store.Close()
 
 	key := []byte("bolt_key")
 	value := []byte("bolt_value")
@@ -50,6 +51,4 @@ func TestBoltStore(t *testing.T) {
 	all, err := store.List()
 	assert.Nil(t, err)
 	assert.Equal(t, value, all[string(key)])
-
-	assert.Nil(t, store.Close())
 }

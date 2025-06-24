@@ -46,9 +46,10 @@ func NewP2PNode(ctx context.Context, listenPort int, privKey crypto.PrivKey) (*P
 		libp2p.Identity(privKey),
 		libp2p.Routing(func(h host.Host) (core_routing.PeerRouting, error) {
 			var err error
-			kdht, err = dht.New(ctx, h)
+			kdht, err = dht.New(ctx, h, dht.Mode(dht.ModeServer))
 			return kdht, err
 		}),
+		libp2p.EnableNATService(),
 	)
 	if err != nil {
 		return nil, err
@@ -75,13 +76,13 @@ func NewP2PNode(ctx context.Context, listenPort int, privKey crypto.PrivKey) (*P
 }
 
 // RegisterTopic joins a topic and stores it for later use.
-func (n *P2PNode) RegisterTopic(topicName string) error {
+func (n *P2PNode) RegisterTopic(topicName string) {
 	topic, err := n.pubsub.Join(topicName)
 	if err != nil {
-		return fmt.Errorf("failed to join topic %s: %w", topicName, err)
+		log.Fatalf("Failed to join topic %s: %v", topicName, err)
 	}
 	n.topics[topicName] = topic
-	return nil
+	log.Printf("DEBUG: Registered topic %s", topicName)
 }
 
 // Subscribe creates a single subscription that handles messages from all registered topics.
@@ -92,6 +93,7 @@ func (n *P2PNode) Subscribe(ctx context.Context, handler func(topic string, msg 
 			log.Printf("Failed to subscribe to topic %s: %v", topicName, err)
 			continue
 		}
+		log.Printf("DEBUG: Subscribed to topic %s", topicName)
 		go n.handleSubscription(ctx, topicName, sub, handler)
 	}
 }
@@ -107,8 +109,10 @@ func (n *P2PNode) handleSubscription(ctx context.Context, topicName string, sub 
 		}
 		// Don't process messages from self
 		if msg.ReceivedFrom == n.host.ID() {
+			log.Printf("DEBUG: Ignoring message from self on topic %s", topicName)
 			continue
 		}
+		log.Printf("DEBUG: Received message on topic %s from peer %s, size: %d bytes", topicName, msg.ReceivedFrom, len(msg.Data))
 		handler(topicName, msg)
 	}
 }
@@ -119,7 +123,15 @@ func (n *P2PNode) Publish(ctx context.Context, topicName string, data []byte) er
 	if !ok {
 		return fmt.Errorf("not subscribed to topic: %s", topicName)
 	}
-	return topic.Publish(ctx, data)
+
+	log.Printf("DEBUG: Publishing message to topic %s, size: %d bytes", topicName, len(data))
+	err := topic.Publish(ctx, data)
+	if err != nil {
+		log.Printf("ERROR: Failed to publish to topic %s: %v", topicName, err)
+		return err
+	}
+	log.Printf("DEBUG: Successfully published message to topic %s", topicName)
+	return nil
 }
 
 // Connect establishes a connection with a peer.

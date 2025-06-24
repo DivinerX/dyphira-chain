@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"math/rand"
 	"sort"
-	"time"
 )
 
 // CommitteeSelector handles committee and proposer selection.
@@ -20,7 +19,7 @@ type CommitteeMember struct {
 
 // SelectCommittee selects up to N validators for the next epoch, weighted by stake, delegation, and reputation.
 func (cs *CommitteeSelector) SelectCommittee(n int) ([]*Validator, error) {
-	validators, err := cs.Registry.ListValidators()
+	validators, err := cs.Registry.GetAllValidators()
 	if err != nil {
 		return nil, err
 	}
@@ -76,11 +75,15 @@ func NewProposerSelectorWithRotation(committee []*Validator, epochStart, epochLe
 	if len(committee) == 0 || epochLength == 0 {
 		return &ProposerSelector{Committee: committee, Slots: slots, EpochStart: epochStart, EpochLength: epochLength}
 	}
+
 	// Shuffle committee for random order
-	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	r := rand.New(rand.NewSource(0))
 	indices := r.Perm(len(committee))
+
+	// Each validator gets exactly 9 consecutive blocks
 	blocksPerValidator := uint64(9)
 	block := epochStart
+
 	for _, idx := range indices {
 		validator := committee[idx]
 		for i := uint64(0); i < blocksPerValidator && block < epochStart+epochLength; i++ {
@@ -88,12 +91,14 @@ func NewProposerSelectorWithRotation(committee []*Validator, epochStart, epochLe
 			block++
 		}
 	}
+
 	// If there are leftover blocks (epochLength not divisible by 9*len(committee)), assign round-robin
 	for block < epochStart+epochLength {
 		validator := committee[(int(block-epochStart))%len(committee)]
 		slots[block] = validator
 		block++
 	}
+
 	return &ProposerSelector{Committee: committee, Slots: slots, EpochStart: epochStart, EpochLength: epochLength}
 }
 

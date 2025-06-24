@@ -36,7 +36,8 @@ func TestValidatorRegistry(t *testing.T) {
 	assert.Equal(t, uint64(200), v2.Stake)
 
 	// Delegate stake
-	err = vr.DelegateStake(addr, 25)
+	delegatorAddr := Address{4, 5, 6}
+	err = vr.DelegateStake(delegatorAddr, addr, 25)
 	assert.Nil(t, err)
 	v2, _ = vr.GetValidator(addr)
 	assert.Equal(t, uint64(75), v2.DelegatedStake)
@@ -48,7 +49,7 @@ func TestValidatorRegistry(t *testing.T) {
 	assert.Equal(t, uint64(99), v2.ComputeReputation)
 
 	// List validators
-	vals, err := vr.ListValidators()
+	vals, err := vr.GetAllValidators()
 	assert.Nil(t, err)
 	assert.Equal(t, 1, len(vals))
 	assert.Equal(t, addr, vals[0].Address)

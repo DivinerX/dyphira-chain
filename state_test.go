@@ -10,19 +10,17 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
-var testKey, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-var testAddr = pubKeyToAddress(&testKey.PublicKey)
-
-func makeTestTx(to Address, value, nonce uint64) *Transaction {
+func makeTestTx(from Address, to Address, value, nonce uint64, privKey *ecdsa.PrivateKey) *Transaction {
 	tx := &Transaction{
-		From:  testAddr,
+		From:  from,
 		To:    to,
 		Value: value,
 		Nonce: nonce,
+		Type:  "transfer",
 	}
 	data, _ := tx.Encode()
 	tx.Hash = sha3.Sum256(data)
-	r, s, _ := ecdsa.Sign(rand.Reader, testKey, tx.Hash[:])
+	r, s, _ := ecdsa.Sign(rand.Reader, privKey, tx.Hash[:])
 	tx.R = r.Bytes()
 	tx.S = s.Bytes()
 	return tx
@@ -30,10 +28,13 @@ func makeTestTx(to Address, value, nonce uint64) *Transaction {
 
 func TestApplyTransaction(t *testing.T) {
 	s := NewState()
+	testKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	testAddr := pubKeyToAddress(&testKey.PublicKey)
+
 	fromAccount := &Account{Address: testAddr, Balance: 100, Nonce: 0}
 	s.PutAccount(fromAccount)
 
-	tx := makeTestTx(Address{1}, 10, 1)
+	tx := makeTestTx(testAddr, Address{1}, 10, 1, testKey)
 
 	err := s.ApplyTransaction(tx)
 	assert.Nil(t, err)
@@ -46,7 +47,7 @@ func TestApplyTransaction(t *testing.T) {
 	assert.Equal(t, uint64(10), toAccount.Balance)
 
 	// Test invalid nonce
-	tx = makeTestTx(Address{1}, 10, 3)
+	tx = makeTestTx(testAddr, Address{1}, 10, 3, testKey)
 	err = s.ApplyTransaction(tx)
 	assert.NotNil(t, err)
 }
@@ -73,11 +74,11 @@ func TestState_ApplyBlock(t *testing.T) {
 	s.PutAccount(acc1)
 	s.PutAccount(acc2)
 
-	tx1 := &Transaction{From: addr1, To: addr2, Value: 10, Nonce: 1}
+	tx1 := &Transaction{From: addr1, To: addr2, Value: 10, Nonce: 1, Type: "transfer"}
 	tx1Data, _ := tx1.Encode()
 	tx1.Hash = sha3.Sum256(tx1Data)
 
-	tx2 := &Transaction{From: addr1, To: addr2, Value: 5, Nonce: 2}
+	tx2 := &Transaction{From: addr1, To: addr2, Value: 5, Nonce: 2, Type: "transfer"}
 	tx2Data, _ := tx2.Encode()
 	tx2.Hash = sha3.Sum256(tx2Data)
 

@@ -189,7 +189,7 @@ sequenceDiagram
 
 - **RegisterValidator**: Adds a validator to the registry
 - **UpdateStake/DelegateStake/UpdateReputation**: Modifies validator properties
-- **ListValidators**: Returns all registered validators
+- **GetAllValidators**: Returns all registered validators
 
 ---
 

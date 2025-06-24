@@ -1,32 +1,68 @@
 package main
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func makeTestValidators(vr *ValidatorRegistry, n int) []Address {
+// Helper to register validators and optionally make them participate via transaction
+func makeTestValidatorsWithParticipation(vr *ValidatorRegistry, state *State, txPool *TransactionPool, n int, participateIndices ...int) ([]Address, []*ecdsa.PrivateKey) {
 	addrs := make([]Address, n)
+	privs := make([]*ecdsa.PrivateKey, n)
+	participateMap := map[int]bool{}
+	for _, idx := range participateIndices {
+		participateMap[idx] = true
+	}
 	for i := 0; i < n; i++ {
-		addr := Address{byte(i + 1)}
+		priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		addr := pubKeyToAddress(&priv.PublicKey)
 		v := &Validator{
 			Address:           addr,
 			Stake:             uint64(100 + i*10),
 			DelegatedStake:    uint64(i * 5),
 			ComputeReputation: uint64(i),
-			Participating:     true,
+			Participating:     false, // Always false initially
 		}
 		_ = vr.RegisterValidator(v)
 		addrs[i] = addr
+		privs[i] = priv
+		// Fund account for participation tx
+		acc := &Account{Address: addr, Balance: 1000, Nonce: 0}
+		_ = state.PutAccount(acc)
+		if participateMap[i] {
+			tx := &Transaction{
+				From:      addr,
+				To:        addr,
+				Value:     0,
+				Nonce:     1,
+				Fee:       0,
+				Type:      "participation",
+				Timestamp: time.Now().UnixNano(),
+			}
+			require.NoError(nil, tx.Sign(priv))
+			err := txPool.AddTransaction(tx, &priv.PublicKey, state)
+			if err == nil {
+				block := &Block{Transactions: []*Transaction{tx}}
+				bc, _ := NewBlockchain(NewMemoryStore())
+				_ = bc.ApplyBlockWithRegistry(block, state, vr)
+			}
+		}
 	}
-	return addrs
+	return addrs, privs
 }
 
 func TestCommitteeSelection(t *testing.T) {
 	store := NewMemoryStore()
 	vr := NewValidatorRegistry(store, "validators")
-	_ = makeTestValidators(vr, 10)
+	state := NewState()
+	txPool := NewTransactionPool()
+	_, _ = makeTestValidatorsWithParticipation(vr, state, txPool, 10, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9)
 	cs := &CommitteeSelector{Registry: vr}
 
 	committee, err := cs.SelectCommittee(5)
@@ -44,7 +80,9 @@ func TestCommitteeSelection(t *testing.T) {
 func TestProposerSelector(t *testing.T) {
 	store := NewMemoryStore()
 	vr := NewValidatorRegistry(store, "validators")
-	_ = makeTestValidators(vr, 3)
+	state := NewState()
+	txPool := NewTransactionPool()
+	_, _ = makeTestValidatorsWithParticipation(vr, state, txPool, 3, 0, 1, 2)
 	cs := &CommitteeSelector{Registry: vr}
 	committee, _ := cs.SelectCommittee(3)
 	ps := NewProposerSelectorWithRotation(committee, 0, 27)
@@ -67,20 +105,13 @@ func TestProposerSelector(t *testing.T) {
 func TestCommitteeSelection_Participation(t *testing.T) {
 	store := NewMemoryStore()
 	vr := NewValidatorRegistry(store, "validators")
-	addrs := make([]Address, 3)
-	for i := 0; i < 3; i++ {
-		addr := Address{byte(i + 1)}
-		v := &Validator{Address: addr, Stake: 100}
-		if i == 0 {
-			v.Participating = true // Only first validator participates
-		}
-		_ = vr.RegisterValidator(v)
-		addrs[i] = addr
-	}
+	state := NewState()
+	txPool := NewTransactionPool()
+	_, _ = makeTestValidatorsWithParticipation(vr, state, txPool, 3, 0) // Only first validator participates
 	cs := &CommitteeSelector{Registry: vr}
 
 	committee, err := cs.SelectCommittee(3)
 	assert.Nil(t, err)
 	assert.Equal(t, 1, len(committee))
-	assert.Equal(t, addrs[0], committee[0].Address)
+	assert.True(t, committee[0].Participating)
 }

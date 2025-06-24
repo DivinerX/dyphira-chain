@@ -54,6 +54,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create application node: %v", err)
 	}
+	defer node.Close()
 
 	if err := node.Start(); err != nil {
 		log.Fatalf("Failed to start node: %v", err)
@@ -76,13 +77,7 @@ func main() {
 	<-sigChan
 	fmt.Println("\nShutting down gracefully...")
 
-	// Close the node
-	if err := node.Close(); err != nil {
-		log.Printf("Error closing node: %v", err)
-	}
-
-	// Close all database connections
-	CloseAllDBConnections()
+	// The deferred node.Close() will be called here.
 
 	fmt.Println("Node shutdown complete.")
 }

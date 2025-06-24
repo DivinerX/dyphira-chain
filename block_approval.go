@@ -26,7 +26,6 @@ func NewBlockApproval(block *Block, committee []*Validator) *BlockApproval {
 }
 
 // AddSignature adds a signature from a validator.
-// In a real implementation, the signature would be verified.
 func (ba *BlockApproval) AddSignature(addr Address, signature []byte) error {
 	if !ba.isCommitteeMember(addr) {
 		return fmt.Errorf("address %s is not in the committee", addr.ToHex())
@@ -69,7 +68,7 @@ func VerifySignature(pubKey *ecdsa.PublicKey, hash Hash, sig []byte) bool {
 	return ecdsa.Verify(pubKey, hash[:], r, s)
 }
 
-// HashBlockForSign returns the hash to be signed for a block (can be extended for domain separation).
+// HashBlockForSign returns the hash to be signed for a block.
 func HashBlockForSign(block *Block) Hash {
 	// For now, just use SHA256 of the block header hash
 	return sha256.Sum256(block.Header.Hash[:])
