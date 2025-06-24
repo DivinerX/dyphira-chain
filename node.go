@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -12,8 +10,9 @@ import (
 	"time"
 
 	"bytes"
-	"crypto/elliptic"
 
+	"github.com/btcsuite/btcd/btcec/v2"
+	btcec_ecdsa "github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	crypto "github.com/libp2p/go-libp2p/core/crypto"
 )
@@ -37,7 +36,7 @@ type AppNode struct {
 	txPool  *TransactionPool
 	vr      *ValidatorRegistry
 	ctx     context.Context
-	privKey *ecdsa.PrivateKey
+	privKey *btcec.PrivateKey
 	address Address
 
 	// DPoS / Consensus
@@ -66,7 +65,7 @@ type AppNode struct {
 var TestSyncCommittee func(newCommittee []*Validator)
 
 // NewAppNode creates and initializes a new full blockchain node.
-func NewAppNode(ctx context.Context, listenPort int, dbPath string, p2pPrivKey crypto.PrivKey, privKey *ecdsa.PrivateKey) (*AppNode, error) {
+func NewAppNode(ctx context.Context, listenPort int, dbPath string, p2pPrivKey crypto.PrivKey, privKey *btcec.PrivateKey) (*AppNode, error) {
 	// --- Storage ---
 	chainStore, err := NewBoltStore(dbPath, "chain")
 	if err != nil {
@@ -100,7 +99,7 @@ func NewAppNode(ctx context.Context, listenPort int, dbPath string, p2pPrivKey c
 	}
 
 	// Use the ECDSA public key to derive the blockchain address
-	addr := pubKeyToAddress(&privKey.PublicKey)
+	addr := pubKeyToAddress(privKey.PubKey())
 
 	node := &AppNode{
 		p2p:               p2p,
@@ -139,7 +138,7 @@ func NewAppNode(ctx context.Context, listenPort int, dbPath string, p2pPrivKey c
 }
 
 // NewAppNodeWithStores creates a node with explicit chain and validator stores (for testing).
-func NewAppNodeWithStores(ctx context.Context, listenPort int, p2pPrivKey crypto.PrivKey, privKey *ecdsa.PrivateKey, chainStore Storage, validatorStore Storage) (*AppNode, error) {
+func NewAppNodeWithStores(ctx context.Context, listenPort int, p2pPrivKey crypto.PrivKey, privKey *btcec.PrivateKey, chainStore Storage, validatorStore Storage) (*AppNode, error) {
 	// --- Blockchain Components ---
 	bc, err := NewBlockchain(chainStore)
 	if err != nil {
@@ -161,7 +160,7 @@ func NewAppNodeWithStores(ctx context.Context, listenPort int, p2pPrivKey crypto
 	}
 
 	// Use the ECDSA public key to derive the blockchain address
-	addr := pubKeyToAddress(&privKey.PublicKey)
+	addr := pubKeyToAddress(privKey.PubKey())
 
 	node := &AppNode{
 		p2p:               p2p,
@@ -288,7 +287,7 @@ func (n *AppNode) handleTransaction(msg *pubsub.Message) {
 
 	log.Printf("DEBUG: Node %s received transaction %s", n.address.ToHex(), netTx.Tx.Hash.ToHex())
 
-	pubKey, err := UnmarshalPublicKey(elliptic.P256(), netTx.PubKey)
+	pubKey, err := UnmarshalPublicKey(netTx.PubKey)
 	if err != nil {
 		log.Printf("Failed to unmarshal public key: %v", err)
 		return
@@ -374,16 +373,8 @@ func (n *AppNode) processReceivedBlock(block *Block) {
 
 	if isCommitteeMember {
 		log.Printf("INFO: Node %s (committee member) is voting for block #%d", n.address.ToHex(), block.Header.BlockNumber)
-		r, s, err := ecdsa.Sign(rand.Reader, n.privKey, block.Header.Hash[:])
-		if err != nil {
-			log.Printf("ERROR: Failed to sign self-approval: %v", err)
-			n.pendingBlocksMu.Lock()
-			delete(n.pendingBlocks, block.Header.Hash)
-			n.pendingBlocksMu.Unlock()
-			return
-		}
-		sig := append(r.Bytes(), s.Bytes()...)
-		if err := approval.AddSignature(n.address, sig); err != nil {
+		sig := btcec_ecdsa.Sign(n.privKey, block.Header.Hash[:])
+		if err := approval.AddSignature(n.address, sig.Serialize()); err != nil {
 			log.Printf("ERROR: Failed to add self-approval: %v", err)
 			n.pendingBlocksMu.Lock()
 			delete(n.pendingBlocks, block.Header.Hash)
@@ -466,7 +457,7 @@ func (n *AppNode) watchBlockApproval(block *Block) {
 			}
 
 			if approval.IsApproved() {
-				n.finalizeApprovedBlock(block)
+				go n.finalizeApprovedBlock(block)
 				return // End the watch
 			}
 		}
@@ -474,7 +465,7 @@ func (n *AppNode) watchBlockApproval(block *Block) {
 }
 
 func (n *AppNode) BroadcastTransaction(tx *Transaction) error {
-	pubKeyBytes := MarshalPublicKey(&n.privKey.PublicKey)
+	pubKeyBytes := MarshalPublicKey(n.privKey.PubKey())
 	netTx := &NetworkTransaction{
 		Tx:     tx,
 		PubKey: pubKeyBytes,
@@ -492,15 +483,11 @@ func (n *AppNode) BroadcastTransaction(tx *Transaction) error {
 }
 
 func (n *AppNode) broadcastApproval(block *Block) {
-	r, s, err := ecdsa.Sign(rand.Reader, n.privKey, block.Header.Hash[:])
-	if err != nil {
-		log.Printf("ERROR: Failed to sign approval for broadcast: %v", err)
-		return
-	}
+	sig := btcec_ecdsa.Sign(n.privKey, block.Header.Hash[:])
 	approval := &Approval{
 		BlockHash: block.Header.Hash,
 		Address:   n.address,
-		Signature: append(r.Bytes(), s.Bytes()...),
+		Signature: sig.Serialize(),
 	}
 	approvalBytes, err := json.Marshal(approval)
 	if err != nil {
@@ -614,8 +601,43 @@ func (n *AppNode) ForceCommitteeAndProposer() {
 	epoch := currentHeight / EpochLength
 	epochStartHeight := epoch * EpochLength
 
-	// Do not re-calculate for the same epoch
-	if n.proposerSelector != nil && n.proposerSelector.EpochStart == epochStartHeight {
+	// Check if we need to re-elect committee
+	needReElection := false
+
+	// Re-elect if no committee exists
+	if n.committee == nil || len(n.committee) == 0 {
+		needReElection = true
+	}
+
+	// Re-elect if we're at a new epoch
+	if n.proposerSelector == nil || n.proposerSelector.EpochStart != epochStartHeight {
+		needReElection = true
+	}
+
+	// Re-elect if we have fewer committee members than expected
+	if len(n.committee) < CommitteeSize {
+		needReElection = true
+	}
+
+	// Re-elect if we have new validators that aren't in the committee
+	if n.committee != nil {
+		committeeMap := make(map[Address]bool)
+		for _, member := range n.committee {
+			committeeMap[member.Address] = true
+		}
+
+		allValidators, err := n.vr.GetAllValidators()
+		if err == nil {
+			for _, v := range allValidators {
+				if v.Participating && !committeeMap[v.Address] {
+					needReElection = true
+					break
+				}
+			}
+		}
+	}
+
+	if !needReElection {
 		return
 	}
 
@@ -628,13 +650,21 @@ func (n *AppNode) ForceCommitteeAndProposer() {
 		log.Printf("WARN: No validators found for epoch %d, cannot form committee.", epoch)
 		return
 	}
+
+	// Log committee members for debugging
+	committeeAddresses := make([]string, len(newCommittee))
+	for i, member := range newCommittee {
+		committeeAddresses[i] = member.Address.ToHex()
+	}
+
 	n.committee = newCommittee
 	if TestSyncCommittee != nil {
 		TestSyncCommittee(newCommittee)
 	}
 
 	n.proposerSelector = NewProposerSelectorWithRotation(newCommittee, epochStartHeight, EpochLength)
-	log.Printf("INFO: Node %s elected new committee for epoch starting at height %d. Committee size: %d", n.address.ToHex(), epochStartHeight, len(n.committee))
+	log.Printf("INFO: Node %s elected new committee for epoch starting at height %d. Committee size: %d, members: %v",
+		n.address.ToHex(), epochStartHeight, len(n.committee), committeeAddresses)
 }
 
 func ReplaceInactiveValidator(committee []*Validator, inactiveAddress Address, vr *ValidatorRegistry) ([]*Validator, error) {

@@ -1,13 +1,13 @@
 package main
 
 import (
-	"crypto/ecdsa"
 	"encoding/json"
 	"fmt"
 	"log"
 	"sync"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -187,7 +187,7 @@ func decodeBlock(data []byte) (*Block, error) {
 	return &b, err
 }
 
-func (bc *Blockchain) CreateBlock(txs []*Transaction, proposer *Validator, privKey *ecdsa.PrivateKey) (*Block, error) {
+func (bc *Blockchain) CreateBlock(txs []*Transaction, proposer *Validator, privKey *btcec.PrivateKey) (*Block, error) {
 	lastBlock, err := bc.GetLastBlock()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get last block: %w", err)

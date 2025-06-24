@@ -1,18 +1,12 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
-	"log"
-	"math/big"
 
-	"bytes"
-
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -43,12 +37,6 @@ func (a Address) ToHex() string {
 	return hex.EncodeToString(a[:])
 }
 
-// PublicKey is the public key of a validator or user.
-type PublicKey ecdsa.PublicKey
-
-// Signature is a digital signature.
-type Signature []byte
-
 // Block represents a single block in the blockchain.
 type Block struct {
 	Header        *Header
@@ -78,8 +66,7 @@ type Transaction struct {
 	Fee       uint64  `json:"fee"`
 	Timestamp int64   `json:"timestamp"`
 	Type      string  `json:"type"` // "transfer", "participation", "register_validator", "delegate"
-	R         []byte  `json:"r"`    // Signature R component
-	S         []byte  `json:"s"`    // Signature S component
+	Signature []byte  `json:"signature"`
 	Hash      Hash    `json:"hash"`
 	Used      bool    `json:"used"` // Flag to prevent duplicate inclusion
 }
@@ -88,7 +75,7 @@ type Transaction struct {
 func (t *Transaction) Encode() ([]byte, error) {
 	// Create a temporary tx without signature components for hashing
 	tempTx := *t
-	tempTx.R, tempTx.S, tempTx.Hash = nil, nil, Hash{}
+	tempTx.Hash = Hash{}
 	return json.Marshal(tempTx)
 }
 
@@ -97,52 +84,25 @@ func (t *Transaction) Decode(data []byte) error {
 	return json.Unmarshal(data, t)
 }
 
-// Sign calculates the transaction hash and signs it with the provided private key.
-func (t *Transaction) Sign(privKey *ecdsa.PrivateKey) error {
-	// Encode the transaction to get the data for hashing
+// Sign calculates the transaction hash and signs it with the provided Secp256k1 private key.
+func (t *Transaction) Sign(privKey *btcec.PrivateKey) error {
 	data, err := t.Encode()
 	if err != nil {
 		return err
 	}
 	t.Hash = sha3.Sum256(data)
-
-	// Sign the hash
-	r, s, err := ecdsa.Sign(rand.Reader, privKey, t.Hash[:])
-	if err != nil {
-		return err
-	}
-
-	t.R = r.Bytes()
-	t.S = s.Bytes()
-
+	sig := ecdsa.Sign(privKey, t.Hash[:])
+	t.Signature = sig.Serialize()
 	return nil
 }
 
-// Verify checks the transaction signature against the given public key.
-func (t *Transaction) Verify(pubKey *ecdsa.PublicKey) bool {
-	if t.R == nil || t.S == nil {
-		return false
-	}
-	r := new(big.Int).SetBytes(t.R)
-	s := new(big.Int).SetBytes(t.S)
-
-	// Re-compute the hash from the transaction data to ensure it hasn't been tampered with
-	tempTx := *t
-	tempTx.R, tempTx.S, tempTx.Hash = nil, nil, Hash{}
-	data, err := json.Marshal(tempTx)
+// Verify checks the transaction signature against the given Secp256k1 public key.
+func (t *Transaction) Verify(pubKey *btcec.PublicKey) bool {
+	sig, err := ecdsa.ParseDERSignature(t.Signature)
 	if err != nil {
-		log.Printf("ERROR: Failed to marshal transaction for verification: %v", err)
 		return false
 	}
-	hash := sha3.Sum256(data)
-
-	// Compare the re-computed hash with the one in the transaction
-	if !bytes.Equal(t.Hash[:], hash[:]) {
-		log.Printf("ERROR: Transaction hash mismatch during verification.")
-		return false
-	}
-
-	return ecdsa.Verify(pubKey, t.Hash[:], r, s)
+	return sig.Verify(t.Hash[:], pubKey)
 }
 
 // NetworkTransaction is a wrapper for broadcasting a transaction with its public key.
@@ -151,18 +111,14 @@ type NetworkTransaction struct {
 	PubKey []byte       `json:"pubKey"` // Marshaled public key bytes
 }
 
-// MarshalPublicKey marshals an ecdsa.PublicKey to bytes.
-func MarshalPublicKey(pub *ecdsa.PublicKey) []byte {
-	return elliptic.Marshal(pub.Curve, pub.X, pub.Y)
+// MarshalPublicKey marshals a Secp256k1 public key to bytes.
+func MarshalPublicKey(pub *btcec.PublicKey) []byte {
+	return pub.SerializeUncompressed()
 }
 
-// UnmarshalPublicKey unmarshals bytes to an ecdsa.PublicKey.
-func UnmarshalPublicKey(curve elliptic.Curve, data []byte) (*ecdsa.PublicKey, error) {
-	x, y := elliptic.Unmarshal(curve, data)
-	if x == nil || y == nil {
-		return nil, errors.New("invalid public key bytes")
-	}
-	return &ecdsa.PublicKey{Curve: curve, X: x, Y: y}, nil
+// UnmarshalPublicKey unmarshals bytes to a Secp256k1 public key.
+func UnmarshalPublicKey(data []byte) (*btcec.PublicKey, error) {
+	return btcec.ParsePubKey(data)
 }
 
 // Encode serializes the NetworkTransaction to a JSON byte slice.
@@ -206,8 +162,7 @@ func NewBlock(header *Header, txs []*Transaction) *Block {
 }
 
 // Sign the block with the proposer's private key.
-func (b *Block) Sign(privKey *ecdsa.PrivateKey) error {
-	// Compute the hash if not already computed
+func (b *Block) Sign(privKey *btcec.PrivateKey) error {
 	if b.Header.Hash == (Hash{}) {
 		hash, err := b.Header.ComputeHash()
 		if err != nil {
@@ -215,14 +170,8 @@ func (b *Block) Sign(privKey *ecdsa.PrivateKey) error {
 		}
 		b.Header.Hash = hash
 	}
-
-	// Sign the block header hash
-	r, s, err := ecdsa.Sign(rand.Reader, privKey, b.Header.Hash[:])
-	if err != nil {
-		return err
-	}
-	// ecdsa.Sign returns r and s components, we need to combine them
-	b.Signature = append(r.Bytes(), s.Bytes()...)
+	sig := ecdsa.Sign(privKey, b.Header.Hash[:])
+	b.Signature = sig.Serialize()
 	return nil
 }
 

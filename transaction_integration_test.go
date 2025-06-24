@@ -1,12 +1,10 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,10 +21,10 @@ func TestTransactionIntegration(t *testing.T) {
 	vr := NewValidatorRegistry(NewMemoryStore(), "validators")
 
 	// Create test accounts
-	privKey1, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	privKey2, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	addr1 := pubKeyToAddress(&privKey1.PublicKey)
-	addr2 := pubKeyToAddress(&privKey2.PublicKey)
+	privKey1, _ := btcec.NewPrivateKey()
+	privKey2, _ := btcec.NewPrivateKey()
+	addr1 := pubKeyToAddress(privKey1.PubKey())
+	addr2 := pubKeyToAddress(privKey2.PubKey())
 
 	// Fund accounts
 	acc1 := &Account{Address: addr1, Balance: 1000, Nonce: 0}
@@ -53,7 +51,7 @@ func TestTransactionIntegration(t *testing.T) {
 	require.NoError(t, tx.Sign(privKey1))
 
 	// Test 2: Add transaction to pool
-	err = txPool.AddTransaction(tx, &privKey1.PublicKey, state)
+	err = txPool.AddTransaction(tx, privKey1.PubKey(), state)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, txPool.Size())
 
@@ -103,10 +101,10 @@ func TestTransactionPoolIntegration(t *testing.T) {
 	txPool := NewTransactionPool()
 
 	// Create test accounts
-	privKey1, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	privKey2, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	addr1 := pubKeyToAddress(&privKey1.PublicKey)
-	addr2 := pubKeyToAddress(&privKey2.PublicKey)
+	privKey1, _ := btcec.NewPrivateKey()
+	privKey2, _ := btcec.NewPrivateKey()
+	addr1 := pubKeyToAddress(privKey1.PubKey())
+	addr2 := pubKeyToAddress(privKey2.PubKey())
 
 	// Fund account 1 with more balance
 	acc1 := &Account{Address: addr1, Balance: 200, Nonce: 0}
@@ -123,7 +121,7 @@ func TestTransactionPoolIntegration(t *testing.T) {
 		Timestamp: time.Now().UnixNano(),
 	}
 	require.NoError(t, tx1.Sign(privKey1))
-	err := txPool.AddTransaction(tx1, &privKey1.PublicKey, state)
+	err := txPool.AddTransaction(tx1, privKey1.PubKey(), state)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, txPool.Size())
 
@@ -138,7 +136,7 @@ func TestTransactionPoolIntegration(t *testing.T) {
 		Timestamp: time.Now().UnixNano(),
 	}
 	require.NoError(t, tx3.Sign(privKey1))
-	err = txPool.AddTransaction(tx3, &privKey1.PublicKey, state)
+	err = txPool.AddTransaction(tx3, privKey1.PubKey(), state)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid nonce")
 	assert.Equal(t, 1, txPool.Size()) // Pool size should not change
@@ -154,7 +152,7 @@ func TestTransactionPoolIntegration(t *testing.T) {
 		Timestamp: time.Now().UnixNano(),
 	}
 	require.NoError(t, tx2.Sign(privKey1))
-	err = txPool.AddTransaction(tx2, &privKey1.PublicKey, state)
+	err = txPool.AddTransaction(tx2, privKey1.PubKey(), state)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid nonce")
 	assert.Equal(t, 1, txPool.Size()) // Pool size should not change
@@ -170,7 +168,7 @@ func TestTransactionPoolIntegration(t *testing.T) {
 	txPool.MarkTransactionAsUsed(selectedTxs[0].Hash)
 
 	// Test 6: Now nonce 2 should be acceptable
-	err = txPool.AddTransaction(tx2, &privKey1.PublicKey, state)
+	err = txPool.AddTransaction(tx2, privKey1.PubKey(), state)
 	assert.NoError(t, err)
 	// Note: Pool size might be 2 because the first transaction is still there but marked as used
 
@@ -185,7 +183,7 @@ func TestTransactionPoolIntegration(t *testing.T) {
 	txPool.MarkTransactionAsUsed(selectedTxs[0].Hash)
 
 	// Test 9: Now nonce 3 should be acceptable
-	err = txPool.AddTransaction(tx3, &privKey1.PublicKey, state)
+	err = txPool.AddTransaction(tx3, privKey1.PubKey(), state)
 	assert.NoError(t, err)
 
 	// Test 10: Nonce 3 should be selectable
@@ -202,8 +200,8 @@ func TestParticipationTransactionIntegration(t *testing.T) {
 	vr := NewValidatorRegistry(NewMemoryStore(), "validators")
 
 	// Create test validator
-	privKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	addr := pubKeyToAddress(&privKey.PublicKey)
+	privKey, _ := btcec.NewPrivateKey()
+	addr := pubKeyToAddress(privKey.PubKey())
 
 	// Register validator but not participating
 	v := &Validator{Address: addr, Stake: 100, Participating: false}
@@ -222,7 +220,7 @@ func TestParticipationTransactionIntegration(t *testing.T) {
 	require.NoError(t, tx.Sign(privKey))
 
 	// Add to pool
-	err := txPool.AddTransaction(tx, &privKey.PublicKey, state)
+	err := txPool.AddTransaction(tx, privKey.PubKey(), state)
 	assert.NoError(t, err)
 
 	// Create and apply block
@@ -249,10 +247,10 @@ func TestTransactionValidationIntegration(t *testing.T) {
 	txPool := NewTransactionPool()
 
 	// Create test accounts
-	privKey1, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	privKey2, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	addr1 := pubKeyToAddress(&privKey1.PublicKey)
-	addr2 := pubKeyToAddress(&privKey2.PublicKey)
+	privKey1, _ := btcec.NewPrivateKey()
+	privKey2, _ := btcec.NewPrivateKey()
+	addr1 := pubKeyToAddress(privKey1.PubKey())
+	addr2 := pubKeyToAddress(privKey2.PubKey())
 
 	// Fund account 1
 	acc1 := &Account{Address: addr1, Balance: 100, Nonce: 0}
@@ -270,7 +268,7 @@ func TestTransactionValidationIntegration(t *testing.T) {
 	}
 	require.NoError(t, tx.Sign(privKey1))
 
-	err := txPool.AddTransaction(tx, &privKey1.PublicKey, state)
+	err := txPool.AddTransaction(tx, privKey1.PubKey(), state)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid nonce")
 
@@ -286,7 +284,7 @@ func TestTransactionValidationIntegration(t *testing.T) {
 	}
 	require.NoError(t, tx2.Sign(privKey1))
 
-	err = txPool.AddTransaction(tx2, &privKey1.PublicKey, state)
+	err = txPool.AddTransaction(tx2, privKey1.PubKey(), state)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "insufficient balance")
 
@@ -303,7 +301,7 @@ func TestTransactionValidationIntegration(t *testing.T) {
 	// Sign with wrong private key
 	require.NoError(t, tx3.Sign(privKey2))
 
-	err = txPool.AddTransaction(tx3, &privKey1.PublicKey, state)
+	err = txPool.AddTransaction(tx3, privKey1.PubKey(), state)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid signature")
 }
@@ -314,10 +312,10 @@ func TestTransactionStateConsistency(t *testing.T) {
 	bc, _ := NewBlockchain(NewMemoryStore())
 
 	// Create test accounts
-	privKey1, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	privKey2, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	addr1 := pubKeyToAddress(&privKey1.PublicKey)
-	addr2 := pubKeyToAddress(&privKey2.PublicKey)
+	privKey1, _ := btcec.NewPrivateKey()
+	privKey2, _ := btcec.NewPrivateKey()
+	addr1 := pubKeyToAddress(privKey1.PubKey())
+	addr2 := pubKeyToAddress(privKey2.PubKey())
 
 	// Fund accounts
 	acc1 := &Account{Address: addr1, Balance: 1000, Nonce: 0}
@@ -370,8 +368,8 @@ func TestTransactionReplayProtection(t *testing.T) {
 	txPool := NewTransactionPool()
 
 	// Create test accounts
-	privKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	addr1 := pubKeyToAddress(&privKey.PublicKey)
+	privKey, _ := btcec.NewPrivateKey()
+	addr1 := pubKeyToAddress(privKey.PubKey())
 	addr2 := Address{2}
 
 	// Fund account
@@ -391,11 +389,11 @@ func TestTransactionReplayProtection(t *testing.T) {
 	require.NoError(t, tx.Sign(privKey))
 
 	// Add transaction to pool
-	err := txPool.AddTransaction(tx, &privKey.PublicKey, state)
+	err := txPool.AddTransaction(tx, privKey.PubKey(), state)
 	assert.NoError(t, err)
 
 	// Try to add the same transaction again (should fail)
-	err = txPool.AddTransaction(tx, &privKey.PublicKey, state)
+	err = txPool.AddTransaction(tx, privKey.PubKey(), state)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "transaction already in pool")
 
@@ -404,7 +402,7 @@ func TestTransactionReplayProtection(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Try to add transaction with same nonce again (should fail)
-	err = txPool.AddTransaction(tx, &privKey.PublicKey, state)
+	err = txPool.AddTransaction(tx, privKey.PubKey(), state)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid nonce")
 }

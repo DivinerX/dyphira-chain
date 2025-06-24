@@ -1,12 +1,10 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,8 +21,8 @@ func TestValidatorRegistrationTransaction(t *testing.T) {
 	vr := NewValidatorRegistry(NewMemoryStore(), "validators")
 
 	// Create test account
-	privKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	addr := pubKeyToAddress(&privKey.PublicKey)
+	priv, _ := btcec.NewPrivateKey()
+	addr := pubKeyToAddress(priv.PubKey())
 
 	// Fund account
 	acc := &Account{Address: addr, Balance: 1000, Nonce: 0}
@@ -40,10 +38,10 @@ func TestValidatorRegistrationTransaction(t *testing.T) {
 		Type:      "register_validator",
 		Timestamp: time.Now().UnixNano(),
 	}
-	require.NoError(t, tx.Sign(privKey))
+	require.NoError(t, tx.Sign(priv))
 
 	// Add transaction to pool
-	err = txPool.AddTransaction(tx, &privKey.PublicKey, state)
+	err = txPool.AddTransaction(tx, priv.PubKey(), state)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, txPool.Size())
 
@@ -54,7 +52,7 @@ func TestValidatorRegistrationTransaction(t *testing.T) {
 
 	// Create block with transaction
 	proposer := &Validator{Address: addr, Stake: 100}
-	block, err := bc.CreateBlock(selectedTxs, proposer, privKey)
+	block, err := bc.CreateBlock(selectedTxs, proposer, priv)
 	require.NoError(t, err)
 	assert.Len(t, block.Transactions, 1)
 	assert.Equal(t, tx.Hash, block.Transactions[0].Hash)
@@ -103,10 +101,11 @@ func TestDelegationTransaction(t *testing.T) {
 	vr := NewValidatorRegistry(NewMemoryStore(), "validators")
 
 	// Create test accounts
-	privKey1, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	privKey2, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	addr1 := pubKeyToAddress(&privKey1.PublicKey)
-	addr2 := pubKeyToAddress(&privKey2.PublicKey)
+	priv, _ := btcec.NewPrivateKey()
+	privKey1 := priv
+	privKey2, _ := btcec.NewPrivateKey()
+	addr1 := pubKeyToAddress(privKey1.PubKey())
+	addr2 := pubKeyToAddress(privKey2.PubKey())
 
 	// Fund accounts
 	acc1 := &Account{Address: addr1, Balance: 1000, Nonce: 0}
@@ -131,7 +130,7 @@ func TestDelegationTransaction(t *testing.T) {
 	require.NoError(t, tx.Sign(privKey1))
 
 	// Add transaction to pool
-	err = txPool.AddTransaction(tx, &privKey1.PublicKey, state)
+	err = txPool.AddTransaction(tx, privKey1.PubKey(), state)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, txPool.Size())
 
@@ -190,8 +189,8 @@ func TestValidatorRegistrationValidation(t *testing.T) {
 	txPool := NewTransactionPool()
 
 	// Create test account
-	privKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	addr := pubKeyToAddress(&privKey.PublicKey)
+	priv, _ := btcec.NewPrivateKey()
+	addr := pubKeyToAddress(priv.PubKey())
 
 	// Fund account
 	acc := &Account{Address: addr, Balance: 100, Nonce: 0}
@@ -207,9 +206,9 @@ func TestValidatorRegistrationValidation(t *testing.T) {
 		Type:      "register_validator",
 		Timestamp: time.Now().UnixNano(),
 	}
-	require.NoError(t, tx1.Sign(privKey))
+	require.NoError(t, tx1.Sign(priv))
 
-	err := txPool.AddTransaction(tx1, &privKey.PublicKey, state)
+	err := txPool.AddTransaction(tx1, priv.PubKey(), state)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "validator registration requires non-zero stake")
 
@@ -223,9 +222,9 @@ func TestValidatorRegistrationValidation(t *testing.T) {
 		Type:      "register_validator",
 		Timestamp: time.Now().UnixNano(),
 	}
-	require.NoError(t, tx2.Sign(privKey))
+	require.NoError(t, tx2.Sign(priv))
 
-	err = txPool.AddTransaction(tx2, &privKey.PublicKey, state)
+	err = txPool.AddTransaction(tx2, priv.PubKey(), state)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "insufficient balance")
 
@@ -239,9 +238,9 @@ func TestValidatorRegistrationValidation(t *testing.T) {
 		Type:      "register_validator",
 		Timestamp: time.Now().UnixNano(),
 	}
-	require.NoError(t, tx3.Sign(privKey))
+	require.NoError(t, tx3.Sign(priv))
 
-	err = txPool.AddTransaction(tx3, &privKey.PublicKey, state)
+	err = txPool.AddTransaction(tx3, priv.PubKey(), state)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, txPool.Size())
 }
@@ -253,10 +252,11 @@ func TestDelegationValidation(t *testing.T) {
 	vr := NewValidatorRegistry(NewMemoryStore(), "validators")
 
 	// Create test accounts
-	privKey1, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	privKey2, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	addr1 := pubKeyToAddress(&privKey1.PublicKey)
-	addr2 := pubKeyToAddress(&privKey2.PublicKey)
+	priv, _ := btcec.NewPrivateKey()
+	privKey1 := priv
+	privKey2, _ := btcec.NewPrivateKey()
+	addr1 := pubKeyToAddress(privKey1.PubKey())
+	addr2 := pubKeyToAddress(privKey2.PubKey())
 
 	// Fund delegator account
 	acc1 := &Account{Address: addr1, Balance: 100, Nonce: 0}
@@ -274,7 +274,7 @@ func TestDelegationValidation(t *testing.T) {
 	}
 	require.NoError(t, tx1.Sign(privKey1))
 
-	err := txPool.AddTransaction(tx1, &privKey1.PublicKey, state)
+	err := txPool.AddTransaction(tx1, privKey1.PubKey(), state)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "delegation requires non-zero amount")
 
@@ -290,7 +290,7 @@ func TestDelegationValidation(t *testing.T) {
 	}
 	require.NoError(t, tx2.Sign(privKey1))
 
-	err = txPool.AddTransaction(tx2, &privKey1.PublicKey, state)
+	err = txPool.AddTransaction(tx2, privKey1.PubKey(), state)
 	assert.NoError(t, err) // Pool validation passes, but block application will fail
 
 	// Remove the invalid transaction from pool
@@ -312,7 +312,7 @@ func TestDelegationValidation(t *testing.T) {
 	}
 	require.NoError(t, tx3.Sign(privKey1))
 
-	err = txPool.AddTransaction(tx3, &privKey1.PublicKey, state)
+	err = txPool.AddTransaction(tx3, privKey1.PubKey(), state)
 	assert.NoError(t, err)
 	assert.Equal(t, 1, txPool.Size())
 }
@@ -329,32 +329,29 @@ func TestMultipleDelegations(t *testing.T) {
 	vr := NewValidatorRegistry(NewMemoryStore(), "validators")
 
 	// Create test accounts
-	privKey1, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	privKey2, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	privKey3, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	addr1 := pubKeyToAddress(&privKey1.PublicKey)
-	addr2 := pubKeyToAddress(&privKey2.PublicKey)
-	addr3 := pubKeyToAddress(&privKey3.PublicKey)
+	priv, _ := btcec.NewPrivateKey()
+	privKey1 := priv
+	privKey2, _ := btcec.NewPrivateKey()
+	addr1 := pubKeyToAddress(privKey1.PubKey())
+	addr2 := pubKeyToAddress(privKey2.PubKey())
 
 	// Fund accounts
 	acc1 := &Account{Address: addr1, Balance: 1000, Nonce: 0}
 	acc2 := &Account{Address: addr2, Balance: 1000, Nonce: 0}
-	acc3 := &Account{Address: addr3, Balance: 1000, Nonce: 0}
 	require.NoError(t, state.PutAccount(acc1))
 	require.NoError(t, state.PutAccount(acc2))
-	require.NoError(t, state.PutAccount(acc3))
 
 	// Register validator
-	validator := &Validator{Address: addr3, Stake: 200, Participating: true}
+	validator := &Validator{Address: addr2, Stake: 200, Participating: true}
 	require.NoError(t, vr.RegisterValidator(validator))
 
 	// Create multiple delegation transactions
 	txs := []*Transaction{}
-	for i, privKey := range []*ecdsa.PrivateKey{privKey1, privKey2} {
-		addr := pubKeyToAddress(&privKey.PublicKey)
+	for i, privKey := range []*btcec.PrivateKey{privKey1, privKey2} {
+		addr := pubKeyToAddress(privKey.PubKey())
 		tx := &Transaction{
 			From:      addr,
-			To:        addr3,              // Same validator
+			To:        addr2,              // Same validator
 			Value:     100 + uint64(i*50), // Different amounts
 			Nonce:     1,
 			Fee:       10,
@@ -371,7 +368,7 @@ func TestMultipleDelegations(t *testing.T) {
 		if tx.From == addr2 {
 			privKey = privKey2
 		}
-		err := txPool.AddTransaction(tx, &privKey.PublicKey, state)
+		err := txPool.AddTransaction(tx, privKey.PubKey(), state)
 		assert.NoError(t, err)
 	}
 	assert.Equal(t, 2, txPool.Size())
@@ -399,7 +396,7 @@ func TestMultipleDelegations(t *testing.T) {
 	}
 
 	// Verify validator has received all delegated stake
-	updatedValidator, err := vr.GetValidator(addr3)
+	updatedValidator, err := vr.GetValidator(addr2)
 	assert.NoError(t, err)
 	assert.NotNil(t, updatedValidator)
 	assert.Equal(t, uint64(200), updatedValidator.Stake)          // Original stake

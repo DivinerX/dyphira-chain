@@ -1,19 +1,18 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcec/v2"
+	ecdsa "github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/crypto/sha3"
 )
 
-func setupTxPoolTest() (*State, *ecdsa.PrivateKey, Address, Address) {
+func setupTxPoolTest() (*State, *btcec.PrivateKey, Address, Address) {
 	state := NewState()
-	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	addr1 := pubKeyToAddress(&priv.PublicKey)
+	priv, _ := btcec.NewPrivateKey()
+	addr1 := pubKeyToAddress(priv.PubKey())
 	addr2 := Address{2}
 	acc1 := &Account{Address: addr1, Balance: 100, Nonce: 0}
 	acc2 := &Account{Address: addr2, Balance: 50, Nonce: 0}
@@ -22,7 +21,7 @@ func setupTxPoolTest() (*State, *ecdsa.PrivateKey, Address, Address) {
 	return state, priv, addr1, addr2
 }
 
-func makePoolTestTx(from, to Address, value, nonce uint64, priv *ecdsa.PrivateKey) *Transaction {
+func makePoolTestTx(from, to Address, value, nonce uint64, priv *btcec.PrivateKey) *Transaction {
 	tx := &Transaction{
 		From:  from,
 		To:    to,
@@ -32,9 +31,8 @@ func makePoolTestTx(from, to Address, value, nonce uint64, priv *ecdsa.PrivateKe
 	}
 	data, _ := tx.Encode()
 	tx.Hash = sha3.Sum256(data)
-	r, s, _ := ecdsa.Sign(rand.Reader, priv, tx.Hash[:])
-	tx.R = r.Bytes()
-	tx.S = s.Bytes()
+	sig := ecdsa.Sign(priv, tx.Hash[:])
+	tx.Signature = sig.Serialize()
 	return tx
 }
 
@@ -44,12 +42,12 @@ func TestTransactionPool(t *testing.T) {
 	tp := NewTransactionPool()
 
 	// Add transaction
-	err := tp.AddTransaction(tx1, &priv.PublicKey, state)
+	err := tp.AddTransaction(tx1, priv.PubKey(), state)
 	assert.Nil(t, err)
 	assert.Equal(t, 1, tp.Size())
 
 	// Duplicate add
-	err = tp.AddTransaction(tx1, &priv.PublicKey, state)
+	err = tp.AddTransaction(tx1, priv.PubKey(), state)
 	assert.NotNil(t, err)
 	assert.Equal(t, 1, tp.Size())
 
@@ -65,7 +63,7 @@ func TestTransactionPool(t *testing.T) {
 	tx2_3 := makePoolTestTx(addr1_2, addr2_2, 2, 3, priv2)
 
 	// Add valid txs
-	err = tp2.AddTransaction(tx2_1, &priv2.PublicKey, state2)
+	err = tp2.AddTransaction(tx2_1, priv2.PubKey(), state2)
 	assert.Nil(t, err)
 
 	// Manually update state for next valid tx
@@ -73,7 +71,7 @@ func TestTransactionPool(t *testing.T) {
 	acc1_2.Nonce++
 	state2.PutAccount(acc1_2)
 
-	err = tp2.AddTransaction(tx2_2, &priv2.PublicKey, state2)
+	err = tp2.AddTransaction(tx2_2, priv2.PubKey(), state2)
 	assert.Nil(t, err)
 
 	// Manually update state for next valid tx
@@ -81,7 +79,7 @@ func TestTransactionPool(t *testing.T) {
 	acc1_2.Nonce++
 	state2.PutAccount(acc1_2)
 
-	err = tp2.AddTransaction(tx2_3, &priv2.PublicKey, state2)
+	err = tp2.AddTransaction(tx2_3, priv2.PubKey(), state2)
 	assert.Nil(t, err)
 
 	// The state's nonce for the account is now 2.
@@ -110,11 +108,10 @@ func TestParticipationTransaction(t *testing.T) {
 	}
 	data, _ := tx.Encode()
 	tx.Hash = sha3.Sum256(data)
-	r, s, _ := ecdsa.Sign(rand.Reader, priv, tx.Hash[:])
-	tx.R = r.Bytes()
-	tx.S = s.Bytes()
+	sig := ecdsa.Sign(priv, tx.Hash[:])
+	tx.Signature = sig.Serialize()
 
-	err := tp.AddTransaction(tx, &priv.PublicKey, state)
+	err := tp.AddTransaction(tx, priv.PubKey(), state)
 	assert.Nil(t, err)
 
 	block := &Block{Transactions: []*Transaction{tx}}

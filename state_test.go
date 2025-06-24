@@ -1,16 +1,15 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"testing"
 
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/crypto/sha3"
 )
 
-func makeTestTx(from Address, to Address, value, nonce uint64, privKey *ecdsa.PrivateKey) *Transaction {
+func makeTestTx(from Address, to Address, value, nonce uint64, privKey *btcec.PrivateKey) *Transaction {
 	tx := &Transaction{
 		From:  from,
 		To:    to,
@@ -20,16 +19,15 @@ func makeTestTx(from Address, to Address, value, nonce uint64, privKey *ecdsa.Pr
 	}
 	data, _ := tx.Encode()
 	tx.Hash = sha3.Sum256(data)
-	r, s, _ := ecdsa.Sign(rand.Reader, privKey, tx.Hash[:])
-	tx.R = r.Bytes()
-	tx.S = s.Bytes()
+	sig := ecdsa.Sign(privKey, tx.Hash[:])
+	tx.Signature = sig.Serialize()
 	return tx
 }
 
 func TestApplyTransaction(t *testing.T) {
 	s := NewState()
-	testKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	testAddr := pubKeyToAddress(&testKey.PublicKey)
+	testKey, _ := btcec.NewPrivateKey()
+	testAddr := pubKeyToAddress(testKey.PubKey())
 
 	fromAccount := &Account{Address: testAddr, Balance: 100, Nonce: 0}
 	s.PutAccount(fromAccount)
@@ -94,4 +92,20 @@ func TestState_ApplyBlock(t *testing.T) {
 
 	acc2, _ = s.GetAccount(addr2)
 	assert.Equal(t, uint64(65), acc2.Balance)
+}
+
+func TestPubKeyToAddress_DerivationAndBech32(t *testing.T) {
+	priv, err := btcec.NewPrivateKey()
+	assert.NoError(t, err)
+	addr := pubKeyToAddress(priv.PubKey())
+	// Check length
+	assert.Equal(t, 20, len(addr[:]))
+	// Check BECH-32 encoding
+	bech, err := AddressToBech32(addr)
+	assert.NoError(t, err)
+	assert.Contains(t, bech, "dpos1")
+	// Check that two different keys produce different addresses
+	priv2, _ := btcec.NewPrivateKey()
+	addr2 := pubKeyToAddress(priv2.PubKey())
+	assert.NotEqual(t, addr, addr2)
 }

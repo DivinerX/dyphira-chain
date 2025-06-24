@@ -1,11 +1,12 @@
 package main
 
 import (
-	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"log"
 	"sync"
+
+	"github.com/btcsuite/btcd/btcec/v2"
 )
 
 type TransactionPool struct {
@@ -20,7 +21,7 @@ func NewTransactionPool() *TransactionPool {
 }
 
 // AddTransaction validates and adds a transaction to the pool.
-func (tp *TransactionPool) AddTransaction(tx *Transaction, pubKey *ecdsa.PublicKey, state *State) error {
+func (tp *TransactionPool) AddTransaction(tx *Transaction, pubKey *btcec.PublicKey, state *State) error {
 	tp.mu.Lock()
 	defer tp.mu.Unlock()
 

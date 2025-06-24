@@ -10,10 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-
+	"github.com/btcsuite/btcd/btcec/v2"
 	crypto "github.com/libp2p/go-libp2p/core/crypto"
 )
 
@@ -38,7 +35,7 @@ func main() {
 
 	// --- 2. Create Node Identity ---
 	// Generate ECDSA private key for blockchain signing
-	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	privKey, err := btcec.NewPrivateKey()
 	if err != nil {
 		log.Fatalf("Failed to generate ECDSA private key: %v", err)
 	}

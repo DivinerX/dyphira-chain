@@ -1,11 +1,14 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/btcsuite/btcd/btcec/v2"
+	"github.com/btcsuite/btcutil/bech32"
+	"github.com/jzelinskie/whirlpool"
+	"golang.org/x/crypto/ripemd160"
 )
 
 type State struct {
@@ -116,11 +119,30 @@ func (s *State) ApplyBlock(block *Block) error {
 	return nil
 }
 
-// Helper: derive address from public key (simple hash for demo)
-func pubKeyToAddress(pub *ecdsa.PublicKey) Address {
-	b := elliptic.Marshal(pub.Curve, pub.X, pub.Y)
+// Helper: derive address from public key (Whirlpool -> RIPEMD-160, Secp256k1)
+func pubKeyToAddress(pub *btcec.PublicKey) Address {
+	b := pub.SerializeUncompressed()
+	whirlpoolHash := whirlpool.New()
+	whirlpoolHash.Write(b)
+	whirlpoolDigest := whirlpoolHash.Sum(nil)
+	ripemd := ripemd160.New()
+	ripemd.Write(whirlpoolDigest[:32])
+	ripeDigest := ripemd.Sum(nil)
 	var addr Address
-	// Use last 20 bytes of the public key as the address (similar to Ethereum)
-	copy(addr[:], b[len(b)-20:])
+	copy(addr[:], ripeDigest[:20])
 	return addr
+}
+
+// BECH-32 encode an Address for display (HRP = "dpos")
+func AddressToBech32(addr Address) (string, error) {
+	fiveBit, err := bech32.ConvertBits(addr[:], 8, 5, true)
+	if err != nil {
+		return "", err
+	}
+	return bech32.Encode("dpos", fiveBit)
+}
+
+// Helper: generate a new Secp256k1 private key
+func GenerateSecp256k1Key() (*btcec.PrivateKey, error) {
+	return btcec.NewPrivateKey()
 }

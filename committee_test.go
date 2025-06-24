@@ -1,27 +1,25 @@
 package main
 
 import (
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"testing"
 	"time"
 
+	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // Helper to register validators and optionally make them participate via transaction
-func makeTestValidatorsWithParticipation(vr *ValidatorRegistry, state *State, txPool *TransactionPool, n int, participateIndices ...int) ([]Address, []*ecdsa.PrivateKey) {
+func makeTestValidatorsWithParticipation(vr *ValidatorRegistry, state *State, txPool *TransactionPool, n int, participateIndices ...int) ([]Address, []*btcec.PrivateKey) {
 	addrs := make([]Address, n)
-	privs := make([]*ecdsa.PrivateKey, n)
+	privs := make([]*btcec.PrivateKey, n)
 	participateMap := map[int]bool{}
 	for _, idx := range participateIndices {
 		participateMap[idx] = true
 	}
 	for i := 0; i < n; i++ {
-		priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-		addr := pubKeyToAddress(&priv.PublicKey)
+		priv, _ := btcec.NewPrivateKey()
+		addr := pubKeyToAddress(priv.PubKey())
 		v := &Validator{
 			Address:           addr,
 			Stake:             uint64(100 + i*10),
@@ -46,7 +44,7 @@ func makeTestValidatorsWithParticipation(vr *ValidatorRegistry, state *State, tx
 				Timestamp: time.Now().UnixNano(),
 			}
 			require.NoError(nil, tx.Sign(priv))
-			err := txPool.AddTransaction(tx, &priv.PublicKey, state)
+			err := txPool.AddTransaction(tx, priv.PubKey(), state)
 			if err == nil {
 				block := &Block{Transactions: []*Transaction{tx}}
 				bc, _ := NewBlockchain(NewMemoryStore())

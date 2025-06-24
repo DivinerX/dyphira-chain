@@ -3,9 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,6 +17,8 @@ import (
 
 	"golang.org/x/crypto/sha3"
 
+	"github.com/btcsuite/btcd/btcec/v2"
+	ecdsa "github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	crypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/stretchr/testify/require"
 )
@@ -86,14 +85,13 @@ func setupTestNodes(t *testing.T, numNodes int) ([]*AppNode, func()) {
 		p2pPrivKey, _, err := crypto.GenerateKeyPairWithReader(crypto.Ed25519, 256, r)
 		require.NoError(t, err)
 
-		privKey, err := ecdsa.GenerateKey(elliptic.P256(), r)
-		require.NoError(t, err)
+		priv, _ := btcec.NewPrivateKey()
 
 		chainStore, err := NewBoltStore(chainDBPath, "chain")
 		require.NoError(t, err)
 		storesToClose = append(storesToClose, chainStore)
 
-		node, err := NewAppNodeWithStores(ctx, port, p2pPrivKey, privKey, chainStore, validatorStore)
+		node, err := NewAppNodeWithStores(ctx, port, p2pPrivKey, priv, chainStore, validatorStore)
 		require.NoError(t, err)
 
 		// Disable automatic test transactions for test nodes
@@ -107,7 +105,7 @@ func setupTestNodes(t *testing.T, numNodes int) ([]*AppNode, func()) {
 	}
 
 	// Use ECDSA-derived address for all funding and validator registration
-	senderAddr := pubKeyToAddress(&nodes[0].privKey.PublicKey)
+	senderAddr := pubKeyToAddress(nodes[0].privKey.PubKey())
 	log.Printf("TEST: Funding sender account. pubKeyToAddress(nodes[0].privKey.PublicKey): %s", senderAddr.ToHex())
 	for _, n := range nodes {
 		acc := &Account{Address: senderAddr, Balance: 1000, Nonce: 0}
@@ -117,7 +115,7 @@ func setupTestNodes(t *testing.T, numNodes int) ([]*AppNode, func()) {
 	// Register all node addresses as participating validators with stake (using ECDSA address)
 	for _, node := range nodes {
 		v := &Validator{
-			Address:           pubKeyToAddress(&node.privKey.PublicKey),
+			Address:           pubKeyToAddress(node.privKey.PubKey()),
 			Stake:             100,
 			DelegatedStake:    0,
 			ComputeReputation: 0,
@@ -128,11 +126,11 @@ func setupTestNodes(t *testing.T, numNodes int) ([]*AppNode, func()) {
 	}
 
 	// Add DPoS delegation: Node 1 delegates 50 stake to Node 2 (using ECDSA addresses)
-	require.NoError(t, nodes[0].vr.DelegateStake(pubKeyToAddress(&nodes[1].privKey.PublicKey), pubKeyToAddress(&nodes[2].privKey.PublicKey), 50))
-	log.Printf("TEST: Node %s delegated 50 stake to Node %s", pubKeyToAddress(&nodes[1].privKey.PublicKey).ToHex(), pubKeyToAddress(&nodes[2].privKey.PublicKey).ToHex())
+	require.NoError(t, nodes[0].vr.DelegateStake(pubKeyToAddress(nodes[1].privKey.PubKey()), pubKeyToAddress(nodes[2].privKey.PubKey()), 50))
+	log.Printf("TEST: Node %s delegated 50 stake to Node %s", pubKeyToAddress(nodes[1].privKey.PubKey()).ToHex(), pubKeyToAddress(nodes[2].privKey.PubKey()).ToHex())
 
 	// Log the public key-derived address for node 0
-	pubKeyAddr := pubKeyToAddress(&nodes[0].privKey.PublicKey)
+	pubKeyAddr := pubKeyToAddress(nodes[0].privKey.PubKey())
 	log.Printf("TEST: pubKeyToAddress(nodes[0].privKey.PublicKey): %s", pubKeyAddr.ToHex())
 
 	cleanup := func() {
@@ -500,7 +498,7 @@ func TestDPoS_CommitteeAndBlockProduction(t *testing.T) {
 		tx.From, tx.To, tx.Value, tx.Nonce, tx.Fee)
 
 	// Try to add the transaction directly to the sender's pool first
-	err = sender.txPool.AddTransaction(tx, &sender.privKey.PublicKey, sender.state)
+	err = sender.txPool.AddTransaction(tx, sender.privKey.PubKey(), sender.state)
 	if err != nil {
 		log.Printf("TEST: ERROR - Failed to add transaction to sender's pool: %v", err)
 	} else {
@@ -607,7 +605,7 @@ func TestDPoS_CommitteeAndBlockProduction(t *testing.T) {
 }
 
 func TestTransactionSignatureJSON(t *testing.T) {
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	priv, err := btcec.NewPrivateKey()
 	require.NoError(t, err)
 
 	tx := &Transaction{
@@ -623,9 +621,8 @@ func TestTransactionSignatureJSON(t *testing.T) {
 	data, err := tx.Encode()
 	require.NoError(t, err)
 	tx.Hash = sha3.Sum256(data)
-	r, s, err := ecdsa.Sign(rand.Reader, priv, tx.Hash[:])
-	require.NoError(t, err)
-	tx.R, tx.S = r.Bytes(), s.Bytes()
+	sig := ecdsa.Sign(priv, tx.Hash[:])
+	tx.Signature = sig.Serialize()
 
 	// Marshal to JSON
 	b, err := json.Marshal(tx)
@@ -636,6 +633,5 @@ func TestTransactionSignatureJSON(t *testing.T) {
 	err = json.Unmarshal(b, &tx2)
 	require.NoError(t, err)
 
-	require.Equal(t, tx.R, tx2.R, "R should survive JSON round-trip")
-	require.Equal(t, tx.S, tx2.S, "S should survive JSON round-trip")
+	require.Equal(t, tx.Signature, tx2.Signature, "Signature should survive JSON round-trip")
 }
