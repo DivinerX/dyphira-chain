@@ -38,6 +38,7 @@ Start a single node for development and testing:
 
 This will:
 - Start a node on port 9000
+- Generate Secp256k1 private/public key pair
 - Register as a validator
 - Begin producing blocks
 - Create test transactions
@@ -80,7 +81,7 @@ Run a comprehensive test with multiple nodes:
 ### Node Startup
 ```
 2025/06/23 16:30:00 INFO: Starting Dyphira L1 node on port 9000
-2025/06/23 16:30:01 INFO: Generated keys and address: 0x1234...
+2025/06/23 16:30:01 INFO: Generated Secp256k1 keys and address: dyphira1...
 2025/06/23 16:30:02 INFO: Node started with ID 12D3KooW...
 2025/06/23 16:30:03 INFO: Registered as validator with stake 100
 2025/06/23 16:30:04 INFO: Starting P2P networking...
@@ -96,7 +97,7 @@ Run a comprehensive test with multiple nodes:
 ### Committee Formation
 ```
 2025/06/23 16:30:20 INFO: Elected new committee for epoch starting at height 0. Committee size: 2
-2025/06/23 16:30:22 INFO: Current proposer: 0x1234...
+2025/06/23 16:30:22 INFO: Current proposer: dyphira1...
 ```
 
 ## Monitoring and Analysis
@@ -130,6 +131,7 @@ tail -f logs/node_9000.log
 2. **Block Production**: ~2 seconds per block
 3. **Transaction Inclusion**: 6-10% of transactions included in blocks
 4. **Validator Registration**: Nodes should register each other
+5. **Address Format**: All addresses displayed as BECH-32 encoded (dyphira1...)
 
 ### Sample Analysis Output
 ```
@@ -148,6 +150,7 @@ DPoS Network Test Results Analysis
 ✅ Delegation transactions working
 ✅ Multi-node network scaling working
 ✅ Dynamic validator joining working
+✅ Secp256k1 cryptographic operations working
 ```
 
 ## Common Commands
@@ -198,6 +201,9 @@ grep "including.*transactions" logs/node_*.log
 
 # Check validator registration
 grep "registered validator" logs/node_*.log
+
+# Check cryptographic operations
+grep "signature" logs/node_*.log
 ```
 
 ## Configuration Options
@@ -213,6 +219,23 @@ grep "registered validator" logs/node_*.log
 export DYPHIRA_LOG_LEVEL=debug             # Set log level
 export DYPHIRA_DB_PATH=./data              # Set database path
 ```
+
+## Cryptographic Features
+
+### Address Format
+- **Internal**: 20-byte addresses derived from Secp256k1 public keys
+- **Display**: BECH-32 encoded with "dyphira" prefix (e.g., `dyphira1...`)
+- **Derivation**: Public Key → Whirlpool → RIPEMD-160 → BECH-32
+
+### Transaction Signing
+- **Algorithm**: Secp256k1 ECDSA (Ethereum-compatible)
+- **Format**: ASN.1-encoded signatures
+- **Verification**: Public key recovery and signature verification
+
+### Key Management
+- **Key Generation**: Secure Secp256k1 private/public key pairs
+- **Storage**: Private keys stored securely for signing operations
+- **Compatibility**: Fully compatible with Ethereum-based systems
 
 ## Next Steps
 
@@ -250,4 +273,4 @@ go build -o dyphira-l1 .
 ./run_network.sh clean
 ```
 
-That's it! You now have a fully functional DPoS blockchain network running locally. 🚀 
+That's it! You now have a fully functional DPoS blockchain network running locally with secure Secp256k1 cryptography. 🚀 

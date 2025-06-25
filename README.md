@@ -11,6 +11,7 @@ This project implements a Delegated Proof-of-Stake (DPoS) blockchain node in Go,
 - **Validator registry** and committee management with delegation support
 - **Comprehensive testing** with multi-node scenarios and resilience testing
 - **Network analysis** and monitoring tools
+- **Cryptographic security** using Secp256k1 keys (Ethereum-compatible) with proper address derivation
 
 ---
 
@@ -40,8 +41,43 @@ This project implements a Delegated Proof-of-Stake (DPoS) blockchain node in Go,
 - [libp2p](https://github.com/libp2p/go-libp2p) for P2P networking
 - [bbolt](https://github.com/etcd-io/bbolt) for persistent storage
 - [testify](https://github.com/stretchr/testify) for testing
+- [btcd/btcec](https://github.com/btcsuite/btcd) for Secp256k1 cryptography
+- [golang.org/x/crypto/whirlpool](https://pkg.go.dev/golang.org/x/crypto/whirlpool) for Whirlpool hashing
+- [golang.org/x/crypto/ripemd160](https://pkg.go.dev/golang.org/x/crypto/ripemd160) for RIPEMD-160 hashing
+- [github.com/btcsuite/btcutil/bech32](https://pkg.go.dev/github.com/btcsuite/btcutil/bech32) for BECH-32 address encoding
 
 See `go.mod` for the full list.
+
+---
+
+## Cryptographic Implementation
+
+### Key Generation and Signing
+- **Private Keys**: Valid Secp256k1 keys (Ethereum-compatible)
+- **Public Keys**: Derived from private keys using Secp256k1 curve
+- **Signatures**: ASN.1-encoded ECDSA signatures (Ethereum-compatible)
+- **Signing**: Uses `github.com/btcsuite/btcd/btcec/v2` for all cryptographic operations
+
+### Address Derivation
+Addresses are derived using the following pipeline:
+1. **Public Key**: Secp256k1 public key (33 or 65 bytes)
+2. **Whirlpool Hash**: 32-byte hash of the public key
+3. **RIPEMD-160 Hash**: 20-byte hash of the Whirlpool result
+4. **BECH-32 Encoding**: Human-readable address format for display
+
+```go
+// Address derivation example
+pubKey := privKey.PubKey()
+whirlpoolHash := whirlpool.Sum(pubKey.SerializeCompressed())
+ripemdHash := ripemd160.Sum(whirlpoolHash[:])
+address := bech32.Encode("dyphira", ripemdHash[:])
+```
+
+### Transaction Signing
+All transactions are signed using Secp256k1 ECDSA:
+- **Hash**: SHA-3 (Keccak-256) of transaction data
+- **Signature**: ASN.1-encoded ECDSA signature
+- **Verification**: Public key recovery and signature verification
 
 ---
 
@@ -64,7 +100,7 @@ go build -o dyphira-l1
 
 Each node creates its own database file (`dyphira-<port>.db`). On startup, the node:
 
-1. Generates ECDSA and libp2p keys
+1. Generates Secp256k1 private/public key pair
 2. Registers itself as a validator with participation enabled
 3. Starts P2P networking and joins the DPoS network
 4. Participates in committee selection, block production, and approval
@@ -161,7 +197,7 @@ type Transaction struct {
     Timestamp int64   `json:"timestamp"`
     Type      string  `json:"type"`
     Hash      Hash    `json:"hash"`
-    Signature []byte  `json:"signature"`
+    Signature []byte  `json:"signature"` // ASN.1-encoded ECDSA signature
 }
 ```
 
@@ -176,6 +212,7 @@ type Transaction struct {
 - Runs the main producer loop for block creation and committee management
 - Manages test transaction generation and delegation transactions
 - Handles account initialization for all known validators
+- Manages Secp256k1 key generation and signing for blocks and transactions
 
 ### P2PNode (`p2p.go`)
 
@@ -188,6 +225,7 @@ type Transaction struct {
 - Stores blocks in a key-value store (BoltDB or in-memory)
 - Handles block creation, validation, and retrieval
 - Supports transaction inclusion and block finalization
+- Uses Secp256k1 signing for block proposals
 
 ### State (`state.go`, `merkle_trie.go`)
 
@@ -195,6 +233,7 @@ type Transaction struct {
 - Applies transactions and blocks to update state
 - Handles fee deduction and balance validation
 - Supports delegation tracking
+- Uses proper address derivation for account identification
 
 ### ValidatorRegistry (`validator_registry.go`)
 
@@ -215,6 +254,7 @@ type Transaction struct {
 - Tracks committee signatures for each block
 - Finalizes blocks when threshold is reached
 - Handles approval timeout and retry logic
+- Uses Secp256k1 signature verification
 
 ### Transaction Pool (`transaction_pool.go`)
 
@@ -222,6 +262,7 @@ type Transaction struct {
 - Selects transactions for block inclusion
 - Supports multiple transaction types
 - Handles nonce validation and balance checks
+- Verifies Secp256k1 signatures on transactions
 
 ---
 
@@ -244,6 +285,8 @@ The integration tests in `node_test.go` simulate:
 - Validator registration and delegation
 - Committee formation and rotation
 - Network resilience and recovery
+- Cryptographic operations (key generation, signing, verification)
+- Address derivation and validation
 
 ### Network Testing
 
@@ -275,6 +318,7 @@ Based on comprehensive testing:
 - **Block Production**: 150+ blocks produced across all tests
 - **Resilience**: Survives node failures and recovers successfully
 - **Delegation**: Supports delegation transactions between validators
+- **Cryptographic Performance**: Efficient Secp256k1 operations with proper signature verification
 
 ### Key Metrics
 
@@ -282,6 +326,7 @@ Based on comprehensive testing:
 - **Transaction Types**: Transfer, delegation, validator registration
 - **Network Latency**: Sub-second block production
 - **Fault Tolerance**: Automatic recovery from node failures
+- **Address Derivation**: Consistent 20-byte addresses with BECH-32 encoding
 
 ---
 
@@ -292,6 +337,7 @@ Based on comprehensive testing:
 - **Networking**: Add new pubsub topics or message types in `p2p.go` and `node.go`
 - **APIs**: Expose RPC or REST endpoints by adding a server in `main.go` or a new file
 - **Testing**: Add new test scenarios in `run_network.sh` and analysis in `analyze_results.sh`
+- **Cryptography**: Extend cryptographic operations while maintaining Secp256k1 compatibility
 
 ---
 
@@ -332,6 +378,7 @@ Based on comprehensive testing:
 2. **Database Lock**: Ensure only one node per database file
 3. **Network Connectivity**: Check firewall settings and peer addresses
 4. **Committee Size**: Small networks will have smaller committees
+5. **Cryptographic Errors**: Ensure all dependencies are properly installed
 
 ### Log Analysis
 
@@ -355,6 +402,8 @@ grep -i error logs/node_*.log
 - Tests are colocated with implementation files
 - Network testing scripts use bash with colored output
 - Analysis scripts provide comprehensive metrics
+- Cryptographic operations use Secp256k1 throughout
+- Address derivation follows the specified pipeline
 
 ---
 

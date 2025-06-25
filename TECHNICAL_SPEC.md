@@ -64,7 +64,7 @@ func (c *Committee) SelectCommittee(validators []Validator, epoch uint64) []Vali
 
 1. **Block Proposal**: Current proposer creates and broadcasts a block
 2. **Transaction Inclusion**: Valid transactions from the pool are included
-3. **Committee Signing**: Committee members sign the block
+3. **Committee Signing**: Committee members sign the block using Secp256k1 ECDSA
 4. **Finalization**: Block is finalized when 2/3 threshold is reached
 
 ## Transaction System
@@ -75,11 +75,12 @@ func (c *Committee) SelectCommittee(validators []Validator, epoch uint64) []Vali
 ```go
 {
     "type": "transfer",
-    "from": "0x...",
-    "to": "0x...",
+    "from": "dyphira1...", // BECH-32 encoded address
+    "to": "dyphira1...",   // BECH-32 encoded address
     "value": 100,
     "nonce": 1,
-    "fee": 1
+    "fee": 1,
+    "signature": "..." // ASN.1-encoded ECDSA signature
 }
 ```
 
@@ -87,11 +88,12 @@ func (c *Committee) SelectCommittee(validators []Validator, epoch uint64) []Vali
 ```go
 {
     "type": "register_validator",
-    "from": "0x...",
-    "to": "0x...", // Same as from
-    "value": 100,  // Stake amount
+    "from": "dyphira1...", // BECH-32 encoded address
+    "to": "dyphira1...",   // Same as from
+    "value": 100,          // Stake amount
     "nonce": 1,
-    "fee": 1
+    "fee": 1,
+    "signature": "..." // ASN.1-encoded ECDSA signature
 }
 ```
 
@@ -99,11 +101,12 @@ func (c *Committee) SelectCommittee(validators []Validator, epoch uint64) []Vali
 ```go
 {
     "type": "delegate",
-    "from": "0x...",
-    "to": "0x...", // Validator address
-    "value": 50,   // Delegation amount
+    "from": "dyphira1...", // BECH-32 encoded address
+    "to": "dyphira1...",   // Validator address
+    "value": 50,           // Delegation amount
     "nonce": 1,
-    "fee": 1
+    "fee": 1,
+    "signature": "..." // ASN.1-encoded ECDSA signature
 }
 ```
 
@@ -111,11 +114,12 @@ func (c *Committee) SelectCommittee(validators []Validator, epoch uint64) []Vali
 ```go
 {
     "type": "participation",
-    "from": "0x...",
-    "to": "0x...", // Same as from
-    "value": 0,    // Not used
+    "from": "dyphira1...", // BECH-32 encoded address
+    "to": "dyphira1...",   // Same as from
+    "value": 0,            // Not used
     "nonce": 1,
-    "fee": 1
+    "fee": 1,
+    "signature": "..." // ASN.1-encoded ECDSA signature
 }
 ```
 
@@ -123,7 +127,7 @@ func (c *Committee) SelectCommittee(validators []Validator, epoch uint64) []Vali
 
 ```go
 func (tp *TransactionPool) ValidateTransaction(tx *Transaction) error {
-    // Check signature
+    // Check Secp256k1 signature
     if !tx.VerifySignature() {
         return errors.New("invalid signature")
     }
@@ -239,7 +243,7 @@ type BlockProposalMessage struct {
 type BlockApprovalMessage struct {
     BlockHash   Hash        `json:"block_hash"`
     Approver    Address     `json:"approver"`
-    Signature   []byte      `json:"signature"`
+    Signature   []byte      `json:"signature"` // ASN.1-encoded ECDSA signature
     Timestamp   int64       `json:"timestamp"`
 }
 ```
@@ -288,10 +292,35 @@ type Storage interface {
 
 ### Cryptographic Primitives
 
-- **Key Generation**: ECDSA P-256 for transaction signing
-- **Address Derivation**: SHA-256 + RIPEMD-160 (Bitcoin-style)
+- **Key Generation**: Secp256k1 for transaction and block signing (Ethereum-compatible)
+- **Address Derivation**: Whirlpool → RIPEMD-160 → BECH-32 encoding
 - **Block Hashing**: SHA-256 for block integrity
 - **Merkle Proofs**: SHA-256 for state verification
+- **Signature Format**: ASN.1-encoded ECDSA signatures
+
+### Address Derivation Pipeline
+
+```go
+// Address derivation process
+func pubKeyToAddress(pubKey *btcec.PublicKey) Address {
+    // 1. Serialize public key (compressed format)
+    pubKeyBytes := pubKey.SerializeCompressed()
+    
+    // 2. Whirlpool hash (32 bytes)
+    whirlpoolHash := whirlpool.Sum(pubKeyBytes)
+    
+    // 3. RIPEMD-160 hash (20 bytes)
+    ripemdHash := ripemd160.Sum(whirlpoolHash[:])
+    
+    // 4. Return as 20-byte address
+    return Address(ripemdHash)
+}
+
+// BECH-32 encoding for display
+func addressToBech32(addr Address) string {
+    return bech32.Encode("dyphira", addr[:])
+}
+```
 
 ### Attack Vectors and Mitigations
 
@@ -299,6 +328,8 @@ type Storage interface {
 2. **Double Spending**: Prevented by nonce validation and state consistency
 3. **Network Partitioning**: Handled by committee-based consensus
 4. **Validator Collusion**: Limited by committee rotation and stake requirements
+5. **Cryptographic Attacks**: Mitigated by using well-established Secp256k1 curve
+6. **Address Collision**: Extremely unlikely due to 160-bit address space
 
 ## Performance Characteristics
 
@@ -311,6 +342,7 @@ Based on testing with 2-6 nodes:
 - **Committee Formation**: 1-2 validators per committee
 - **Network Latency**: Sub-second message propagation
 - **State Updates**: Immediate for included transactions
+- **Cryptographic Operations**: Efficient Secp256k1 signing and verification
 
 ### Scalability Considerations
 
@@ -318,6 +350,7 @@ Based on testing with 2-6 nodes:
 - **Vertical Scaling**: Optimize block size and transaction processing
 - **Network Scaling**: Use DHT for efficient peer discovery
 - **Storage Scaling**: BoltDB provides ACID transactions and efficient storage
+- **Cryptographic Scaling**: Secp256k1 operations are highly optimized
 
 ## Testing Framework
 
@@ -328,6 +361,7 @@ Based on testing with 2-6 nodes:
 3. **Network Tests**: Multi-node network simulation
 4. **Stress Tests**: High-load performance testing
 5. **Resilience Tests**: Fault tolerance and recovery testing
+6. **Cryptographic Tests**: Key generation, signing, verification, and address derivation
 
 ### Test Scenarios
 
@@ -361,6 +395,7 @@ Provides metrics for:
 - Validator registration metrics
 - Block production analysis
 - Network performance summary
+- Cryptographic operation performance
 
 ## Configuration
 
@@ -384,6 +419,7 @@ type Config struct {
 - **Committee Size**: Dynamic (1-2 for small networks)
 - **Block Interval**: 2 seconds
 - **Approval Timeout**: 10 seconds
+- **Address Prefix**: "dyphira" for BECH-32 encoding
 
 ## Future Enhancements
 
@@ -404,4 +440,4 @@ type Config struct {
 
 ## Conclusion
 
-Dyphira L1 provides a robust, scalable, and secure DPoS blockchain implementation with comprehensive testing and monitoring capabilities. The modular architecture allows for easy extension and customization while maintaining high performance and reliability. 
+Dyphira L1 provides a robust, scalable, and secure DPoS blockchain implementation with comprehensive testing and monitoring capabilities. The modular architecture allows for easy extension and customization while maintaining high performance and reliability. The cryptographic implementation using Secp256k1 ensures compatibility with Ethereum-based systems while providing strong security guarantees. 
