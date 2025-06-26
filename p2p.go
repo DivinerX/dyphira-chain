@@ -31,6 +31,10 @@ type P2PNode struct {
 	topics   map[string]*pubsub.Topic
 	handlers map[string]func(*pubsub.Message)
 	ctx      context.Context
+
+	// BAR integration hooks
+	OnPeerConnect   func(peerID peer.ID, address string)
+	OnPeerHandshake func(peerID peer.ID, address string)
 }
 
 // NewP2PNode creates and starts a new P2P node.
@@ -151,6 +155,17 @@ func (n *P2PNode) Connect(ctx context.Context, peerAddr string) error {
 	}
 
 	fmt.Printf("Successfully connected to peer: %s\n", peerInfo.ID)
+
+	// BAR integration: notify on peer connect
+	if n.OnPeerConnect != nil {
+		// Use the first address as string if available
+		addrStr := ""
+		if len(peerInfo.Addrs) > 0 {
+			addrStr = peerInfo.Addrs[0].String()
+		}
+		n.OnPeerConnect(peerInfo.ID, addrStr)
+	}
+
 	return nil
 }
 
@@ -189,3 +204,13 @@ func (n *P2PNode) Discover(ctx context.Context) {
 	wg.Wait()
 	fmt.Println("Peer discovery complete.")
 }
+
+// GetListenAddr returns the listening address of the node
+func (n *P2PNode) GetListenAddr() string {
+	if len(n.host.Addrs()) > 0 {
+		return n.host.Addrs()[0].String()
+	}
+	return ""
+}
+
+// Close closes the P2P node and all its connections.

@@ -15,6 +15,7 @@ import (
 	btcec_ecdsa "github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	crypto "github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 const (
@@ -38,6 +39,12 @@ type AppNode struct {
 	ctx     context.Context
 	privKey *btcec.PrivateKey
 	address Address
+
+	// BAR Resilient Network
+	barNet                *BARNetwork
+	handshakeManager      *HandshakeManager
+	optimisticPushManager *OptimisticPushManager
+	inactivityMonitor     *InactivityMonitor
 
 	// DPoS / Consensus
 	committeeSelector *CommitteeSelector
@@ -98,6 +105,14 @@ func NewAppNode(ctx context.Context, listenPort int, dbPath string, p2pPrivKey c
 		return nil, fmt.Errorf("failed to create P2P node: %w", err)
 	}
 
+	// --- BAR Network ---
+	barNet := NewBARNetwork(nil) // Use default config for now
+
+	// Wire up BAR integration: add peer to BAR network on connect
+	p2p.OnPeerConnect = func(peerID peer.ID, address string) {
+		barNet.AddPeer(peerID, address)
+	}
+
 	// Use the ECDSA public key to derive the blockchain address
 	addr := pubKeyToAddress(privKey.PubKey())
 
@@ -110,6 +125,8 @@ func NewAppNode(ctx context.Context, listenPort int, dbPath string, p2pPrivKey c
 		ctx:               ctx,
 		privKey:           privKey,
 		address:           addr,
+		barNet:            barNet,
+		handshakeManager:  nil, // Will be initialized after node creation
 		committeeSelector: &CommitteeSelector{Registry: vr},
 		pendingBlocks:     make(map[Hash]*BlockApproval),
 		approvalBuffer:    make(map[Hash][]*Approval),
@@ -117,6 +134,23 @@ func NewAppNode(ctx context.Context, listenPort int, dbPath string, p2pPrivKey c
 		chainStore:        chainStore,
 		validatorStore:    validatorStore,
 	}
+
+	// --- Handshake Manager ---
+	node.handshakeManager = NewHandshakeManager(node)
+
+	// --- Optimistic Push Manager ---
+	node.optimisticPushManager = NewOptimisticPushManager(node)
+
+	// --- Inactivity Monitor ---
+	node.inactivityMonitor = NewInactivityMonitor(node, false) // Default to non-seed node
+
+	// Wire up optimistic push for newly promoted peers
+	barNet.SetOnPeerStatusChange(func(peerID peer.ID, oldStatus, newStatus PeerStatus) {
+		if oldStatus == PeerStatusGreylist && newStatus == PeerStatusWhitelist {
+			// Trigger optimistic push for newly promoted peer
+			node.optimisticPushManager.TriggerOptimisticPushForNewPeer(peerID)
+		}
+	})
 
 	// Register self as a validator (participating by default)
 	if err := vr.RegisterValidator(&Validator{Address: addr, Stake: 100, Participating: true}); err != nil {
@@ -134,6 +168,7 @@ func NewAppNode(ctx context.Context, listenPort int, dbPath string, p2pPrivKey c
 	}
 
 	log.Printf("Node %s registered as validator (ECDSA address, participating) with initial balance %d", addr.ToHex(), initialAccount.Balance)
+
 	return node, nil
 }
 
@@ -159,6 +194,14 @@ func NewAppNodeWithStores(ctx context.Context, listenPort int, p2pPrivKey crypto
 		return nil, fmt.Errorf("failed to create P2P node: %w", err)
 	}
 
+	// --- BAR Network ---
+	barNet := NewBARNetwork(nil) // Use default config for now
+
+	// Wire up BAR integration: add peer to BAR network on connect
+	p2p.OnPeerConnect = func(peerID peer.ID, address string) {
+		barNet.AddPeer(peerID, address)
+	}
+
 	// Use the ECDSA public key to derive the blockchain address
 	addr := pubKeyToAddress(privKey.PubKey())
 
@@ -171,6 +214,8 @@ func NewAppNodeWithStores(ctx context.Context, listenPort int, p2pPrivKey crypto
 		ctx:               ctx,
 		privKey:           privKey,
 		address:           addr,
+		barNet:            barNet,
+		handshakeManager:  nil, // Will be initialized after node creation
 		committeeSelector: &CommitteeSelector{Registry: vr},
 		pendingBlocks:     make(map[Hash]*BlockApproval),
 		approvalBuffer:    make(map[Hash][]*Approval),
@@ -178,6 +223,23 @@ func NewAppNodeWithStores(ctx context.Context, listenPort int, p2pPrivKey crypto
 		chainStore:        chainStore,
 		validatorStore:    validatorStore,
 	}
+
+	// --- Handshake Manager ---
+	node.handshakeManager = NewHandshakeManager(node)
+
+	// --- Optimistic Push Manager ---
+	node.optimisticPushManager = NewOptimisticPushManager(node)
+
+	// --- Inactivity Monitor ---
+	node.inactivityMonitor = NewInactivityMonitor(node, false) // Default to non-seed node
+
+	// Wire up optimistic push for newly promoted peers
+	barNet.SetOnPeerStatusChange(func(peerID peer.ID, oldStatus, newStatus PeerStatus) {
+		if oldStatus == PeerStatusGreylist && newStatus == PeerStatusWhitelist {
+			// Trigger optimistic push for newly promoted peer
+			node.optimisticPushManager.TriggerOptimisticPushForNewPeer(peerID)
+		}
+	})
 
 	// Register self as a validator (participating by default)
 	if err := vr.RegisterValidator(&Validator{Address: addr, Stake: 100, Participating: true}); err != nil {
@@ -227,6 +289,15 @@ func (n *AppNode) Start() error {
 	go n.p2p.Subscribe(n.ctx, n.handleNetworkMessage)
 	go n.p2p.Discover(n.ctx)
 	go n.producerLoop()
+
+	// Start BAR handshake manager
+	n.handshakeManager.Start(n.ctx)
+
+	// Start BAR optimistic push manager
+	n.optimisticPushManager.Start(n.ctx)
+
+	// Start BAR inactivity monitor
+	n.inactivityMonitor.Start(n.ctx)
 
 	// Broadcast our validator registration to the network
 	go n.broadcastValidatorRegistration()
@@ -282,6 +353,8 @@ func (n *AppNode) handleTransaction(msg *pubsub.Message) {
 	var netTx NetworkTransaction
 	if err := json.Unmarshal(msg.Data, &netTx); err != nil {
 		log.Printf("Failed to decode network tx: %v", err)
+		// BAR: Update POM score for malformed message
+		n.barNet.UpdatePOMScore(msg.ReceivedFrom, 1, "malformed transaction message")
 		return
 	}
 
@@ -290,11 +363,15 @@ func (n *AppNode) handleTransaction(msg *pubsub.Message) {
 	pubKey, err := UnmarshalPublicKey(netTx.PubKey)
 	if err != nil {
 		log.Printf("Failed to unmarshal public key: %v", err)
+		// BAR: Update POM score for invalid public key
+		n.barNet.UpdatePOMScore(msg.ReceivedFrom, 1, "invalid public key")
 		return
 	}
 
 	if err := n.txPool.AddTransaction(netTx.Tx, pubKey, n.state); err != nil {
 		log.Printf("Failed to add transaction to pool: %v", err)
+		// BAR: Update POM score for invalid transaction
+		n.barNet.UpdatePOMScore(msg.ReceivedFrom, 1, "invalid transaction")
 		return
 	}
 
@@ -306,6 +383,8 @@ func (n *AppNode) handleBlockProposal(msg *pubsub.Message) {
 	var block Block
 	if err := json.Unmarshal(msg.Data, &block); err != nil {
 		log.Printf("Failed to decode block proposal: %v", err)
+		// BAR: Update POM score for malformed block
+		n.barNet.UpdatePOMScore(msg.ReceivedFrom, 2, "malformed block message")
 		return
 	}
 	n.processReceivedBlock(&block)
@@ -400,6 +479,8 @@ func (n *AppNode) handleApproval(msg *pubsub.Message) {
 	var approvalMsg Approval
 	if err := json.Unmarshal(msg.Data, &approvalMsg); err != nil {
 		log.Printf("ERROR: Failed to decode approval: %v", err)
+		// BAR: Update POM score for malformed approval
+		n.barNet.UpdatePOMScore(msg.ReceivedFrom, 1, "malformed approval message")
 		return
 	}
 	log.Printf("INFO: Node %s received approval for block %s from %s", n.address.ToHex(), approvalMsg.BlockHash.ToHex(), approvalMsg.Address.ToHex())
@@ -499,99 +580,42 @@ func (n *AppNode) broadcastApproval(block *Block) {
 	}
 }
 
+// producerLoop is the main loop for block production and consensus.
 func (n *AppNode) producerLoop() {
-	ticker := time.NewTicker(2 * time.Second)
+	blockInterval := 2 * time.Second
+	ticker := time.NewTicker(blockInterval)
 	defer ticker.Stop()
 
-	lastBlockRequest := time.Now()
-	blockRequestCooldown := 5 * time.Second
+	round := uint64(0)
 
 	for {
 		select {
 		case <-n.ctx.Done():
 			return
 		case <-ticker.C:
-			currentHeight := n.bc.Height()
-			log.Printf("DEBUG: Node %s sees blockchain height: %d", n.address.ToHex(), currentHeight)
+			round++
 
-			if time.Since(lastBlockRequest) > blockRequestCooldown {
-				if currentHeight == 0 {
-					log.Printf("INFO: Node %s is at height 0, requesting block #1", n.address.ToHex())
-					n.RequestBlock(1)
-					lastBlockRequest = time.Now()
-				}
+			// Update BAR network round
+			n.handshakeManager.UpdateRound(round)
+
+			// Use BAR network to select peers for this round
+			selectedPeers := n.barNet.FindNodes(round)
+			log.Printf("BAR: Round %d - Selected %d peers for connection", round, len(selectedPeers))
+
+			// Log BAR network status
+			whitelist := n.barNet.GetWhitelist()
+			greylist := n.barNet.GetGreylist()
+			banned := n.barNet.GetBanned()
+			log.Printf("BAR: Status - Whitelist: %d, Greylist: %d, Banned: %d",
+				len(whitelist), len(greylist), len(banned))
+
+			// Cleanup old reputation records periodically
+			if round%10 == 0 {
+				n.barNet.CleanupReputationRecords()
 			}
 
+			// Continue with existing block production logic
 			n.ForceCommitteeAndProposer()
-			if n.proposerSelector == nil {
-				log.Printf("WARN: Node %s has no proposer selector yet, skipping block production.", n.address.ToHex())
-				continue
-			}
-
-			nextBlockHeight := currentHeight + 1
-			proposer := n.proposerSelector.ProposerForBlock(nextBlockHeight)
-			if proposer == nil {
-				log.Printf("WARN: No proposer for block %d", nextBlockHeight)
-				continue
-			}
-			log.Printf("DEBUG: Proposer for block %d is %s", nextBlockHeight, proposer.Address.ToHex())
-
-			if proposer.Address == n.address {
-				log.Printf("INFO: Node %s IS the proposer for block #%d. Producing block...", n.address.ToHex(), nextBlockHeight)
-				txs := n.txPool.SelectTransactions(10, n.state)
-				log.Printf("INFO: Node %s including %d transactions in block #%d", n.address.ToHex(), len(txs), nextBlockHeight)
-
-				for _, tx := range txs {
-					n.txPool.MarkTransactionAsUsed(tx.Hash)
-				}
-
-				lastBlock, err := n.bc.GetLastBlock()
-				if err != nil {
-					log.Printf("ERROR: Failed to get last block: %v", err)
-					continue
-				}
-
-				// Calculate total gas fees from transactions
-				var totalGas uint64
-				for _, tx := range txs {
-					totalGas += tx.Fee
-				}
-
-				header := &Header{
-					BlockNumber:     nextBlockHeight,
-					PreviousHash:    lastBlock.Header.Hash,
-					Timestamp:       time.Now().UnixNano(),
-					Proposer:        n.address,
-					TransactionRoot: computeTransactionRoot(txs),
-					Gas:             totalGas, // Set the calculated gas
-				}
-				hash, err := header.ComputeHash()
-				if err != nil {
-					log.Printf("ERROR: Failed to compute header hash: %v", err)
-					continue
-				}
-				header.Hash = hash
-
-				block := NewBlock(header, txs)
-				block.ValidatorList = n.committee // Set the current committee
-				if err := block.Sign(n.privKey); err != nil {
-					log.Printf("ERROR: Failed to sign new block: %v", err)
-					continue
-				}
-
-				blockBytes, err := json.Marshal(block)
-				if err != nil {
-					log.Printf("ERROR: Failed to marshal block: %v", err)
-					continue
-				}
-
-				if err := n.p2p.Publish(n.ctx, BlockTopic, blockBytes); err != nil {
-					log.Printf("ERROR: Failed to publish block proposal: %v", err)
-				} else {
-					log.Printf("SUCCESS: Node %s published block proposal #%d", n.address.ToHex(), nextBlockHeight)
-				}
-				n.processReceivedBlock(block)
-			}
 		}
 	}
 }
