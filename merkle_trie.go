@@ -11,6 +11,7 @@ import (
 type Node struct {
 	Hash  Hash
 	Value []byte
+	Key   []byte // Store the original key
 	Left  *Node
 	Right *Node
 }
@@ -18,18 +19,23 @@ type Node struct {
 // MerkleTrie represents the Merkle Trie structure.
 type MerkleTrie struct {
 	Root *Node
+	// Keep a map for efficient retrieval of all key-value pairs
+	kvMap map[string][]byte
 }
 
 // NewMerkleTrie creates a new Merkle Trie.
 func NewMerkleTrie() *MerkleTrie {
 	return &MerkleTrie{
-		Root: &Node{},
+		Root:  &Node{},
+		kvMap: make(map[string][]byte),
 	}
 }
 
 // Insert adds a key-value pair to the trie.
 func (t *MerkleTrie) Insert(key []byte, value []byte) {
 	t.Root = t.insert(t.Root, key, value, 0)
+	// Store in map for efficient retrieval
+	t.kvMap[string(key)] = value
 }
 
 func (t *MerkleTrie) insert(node *Node, key []byte, value []byte, depth int) *Node {
@@ -39,6 +45,7 @@ func (t *MerkleTrie) insert(node *Node, key []byte, value []byte, depth int) *No
 
 	if depth == len(key)*8 {
 		node.Value = value
+		node.Key = key // Store the original key
 		node.Hash = Hash(sha3.Sum256(value))
 		return node
 	}
@@ -105,4 +112,22 @@ func (t *MerkleTrie) print(node *Node, indent int, buf *bytes.Buffer) {
 	fmt.Fprintf(buf, "%s- Hash: %s, Value: %s\n", bytes.Repeat([]byte("  "), indent), node.Hash.ToHex(), string(node.Value))
 	t.print(node.Left, indent+1, buf)
 	t.print(node.Right, indent+1, buf)
+}
+
+// KVPair represents a key-value pair in the trie
+type KVPair struct {
+	Key   []byte
+	Value []byte
+}
+
+// All returns all key-value pairs in the trie
+func (t *MerkleTrie) All() []KVPair {
+	var pairs []KVPair
+	for key, value := range t.kvMap {
+		pairs = append(pairs, KVPair{
+			Key:   []byte(key),
+			Value: value,
+		})
+	}
+	return pairs
 }

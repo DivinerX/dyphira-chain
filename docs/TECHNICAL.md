@@ -12,6 +12,10 @@
 - [State Management](#state-management)
 - [Transaction Pool](#transaction-pool)
 - [Validator Registry](#validator-registry)
+- [Transaction Batching](#transaction-batching)
+- [Fast Sync Protocol](#fast-sync-protocol)
+- [Metrics Collection](#metrics-collection)
+- [Graceful Shutdown](#graceful-shutdown)
 - [Extending the System](#extending-the-system)
 
 ---
@@ -290,14 +294,53 @@ func (tx *Transaction) VerifySignature() bool {
 
 ---
 
-## Extending the System
+## Transaction Batching
 
-- **Consensus**: Change committee selection or approval logic in `committee.go` and `block_approval.go`
-- **State**: Add new account types or smart contract logic in `state.go` and `merkle_trie.go`
-- **Networking**: Add new message types or topics in `p2p.go` and `node.go`
-- **APIs**: Add RPC/REST endpoints for external interaction
-- **Storage**: Implement new storage backends by extending the `IBlockStore` interface
-- **Cryptography**: Extend cryptographic operations while maintaining Secp256k1 compatibility
+- **Purpose**: Groups transactions into batches for efficient block production and throughput.
+- **Batcher Logic**: Maintains a current batch, adds transactions until batch size or timeout is reached, then processes the batch.
+- **Configuration**: Batch size and timeout are configurable.
+- **Metrics**: Exposes batch size, processing time, throughput, and success rate.
+- **Integration**: Used by the block producer to select transactions for new blocks.
+
+---
+
+## Fast Sync Protocol
+
+- **Purpose**: Rapidly synchronizes a new node to the latest block height/state.
+- **How it works**:
+  - On startup, if the node is far behind, it requests state snapshots and block streams from peers.
+  - Applies state and blocks in order until caught up.
+  - Switches to normal sync once up-to-date.
+- **Integration**: Managed by `FastSyncManager`, triggered automatically or via API.
+
+---
+
+## Metrics Collection
+
+- **Purpose**: Collects and exports node, network, consensus, and performance metrics.
+- **Metrics Collected**: Peer count, block height, committee size, approval rate, transaction pool size, memory usage, goroutines, syncing status, and more.
+- **Export**: Metrics are exported as JSON (see `metrics.go`).
+- **Integration**: Metrics are periodically collected and can be queried or exported for monitoring.
+
+---
+
+## Graceful Shutdown
+
+- **Purpose**: Ensures all node components shut down cleanly and in the correct order.
+- **How it works**:
+  - Handles OS signals or API shutdown requests.
+  - Coordinates shutdown of P2P, blockchain, batcher, metrics, etc.
+  - Reports shutdown status and reason.
+- **Integration**: Managed by `GracefulShutdown`, can be triggered by signal or API.
+
+---
+
+## Extending the System (updated)
+
+- **Batching**: Tune or extend transaction batching logic in `transaction_batching.go`.
+- **Fast Sync**: Modify or extend fast sync protocol in `fast_sync.go`.
+- **Metrics**: Add new metrics or export formats in `metrics.go`.
+- **Shutdown**: Add new shutdown hooks or status reporting in `graceful_shutdown.go`.
 
 ---
 

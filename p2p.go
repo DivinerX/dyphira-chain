@@ -35,6 +35,11 @@ type P2PNode struct {
 	// BAR integration hooks
 	OnPeerConnect   func(peerID peer.ID, address string)
 	OnPeerHandshake func(peerID peer.ID, address string)
+
+	// Bandwidth tracking
+	bandwidthIn  uint64
+	bandwidthOut uint64
+	mu           sync.RWMutex
 }
 
 // NewP2PNode creates and starts a new P2P node.
@@ -116,6 +121,10 @@ func (n *P2PNode) handleSubscription(ctx context.Context, topicName string, sub 
 			log.Printf("DEBUG: Ignoring message from self on topic %s", topicName)
 			continue
 		}
+
+		// Track incoming bandwidth
+		n.UpdateBandwidthIn(uint64(len(msg.Data)))
+
 		log.Printf("DEBUG: Received message on topic %s from peer %s, size: %d bytes", topicName, msg.ReceivedFrom, len(msg.Data))
 		handler(topicName, msg)
 	}
@@ -129,6 +138,10 @@ func (n *P2PNode) Publish(ctx context.Context, topicName string, data []byte) er
 	}
 
 	log.Printf("DEBUG: Publishing message to topic %s, size: %d bytes", topicName, len(data))
+
+	// Track outgoing bandwidth
+	n.UpdateBandwidthOut(uint64(len(data)))
+
 	err := topic.Publish(ctx, data)
 	if err != nil {
 		log.Printf("ERROR: Failed to publish to topic %s: %v", topicName, err)
@@ -213,4 +226,43 @@ func (n *P2PNode) GetListenAddr() string {
 	return ""
 }
 
+// GetListenPort returns the port number the node is listening on
+func (n *P2PNode) GetListenPort() int {
+	if len(n.host.Addrs()) > 0 {
+		addr := n.host.Addrs()[0]
+		// Extract port from multiaddr
+		port, err := addr.ValueForProtocol(multiaddr.P_TCP)
+		if err == nil {
+			// Convert string port to int
+			var portNum int
+			fmt.Sscanf(port, "%d", &portNum)
+			return portNum
+		}
+	}
+	return 0
+}
+
 // Close closes the P2P node and all its connections.
+
+// GetBandwidthStats returns current bandwidth statistics
+func (p2p *P2PNode) GetBandwidthStats() (uint64, uint64) {
+	p2p.mu.RLock()
+	defer p2p.mu.RUnlock()
+	return p2p.bandwidthIn, p2p.bandwidthOut
+}
+
+// UpdateBandwidthIn increments the incoming bandwidth counter
+func (p2p *P2PNode) UpdateBandwidthIn(bytes uint64) {
+	p2p.mu.Lock()
+	defer p2p.mu.Unlock()
+	p2p.bandwidthIn += bytes
+}
+
+// UpdateBandwidthOut increments the outgoing bandwidth counter
+func (p2p *P2PNode) UpdateBandwidthOut(bytes uint64) {
+	p2p.mu.Lock()
+	defer p2p.mu.Unlock()
+	p2p.bandwidthOut += bytes
+}
+
+// Publish publishes a message to a topic with bandwidth tracking

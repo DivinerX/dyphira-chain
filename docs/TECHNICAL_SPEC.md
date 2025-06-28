@@ -4,6 +4,27 @@
 
 Dyphira L1 is a Delegated Proof-of-Stake (DPoS) blockchain implementation that provides a robust, scalable, and fault-tolerant consensus mechanism. This document outlines the technical specifications, architecture, and implementation details.
 
+## New Features (2024)
+
+### Fast Sync Protocol
+- **Purpose**: Rapidly synchronizes new nodes to the latest block height/state.
+- **Protocol**: Node requests state snapshot and block stream from peers, applies them, and switches to normal sync when caught up.
+- **Manager**: `FastSyncManager` handles sync logic and peer coordination.
+
+### Transaction Batching
+- **Purpose**: Groups transactions into batches for efficient block production.
+- **Batcher**: `TransactionBatcher` manages batches, configurable size/timeout, and exposes batch metrics.
+- **Metrics**: Batch size, processing time, throughput, and success rate.
+
+### Enhanced Metrics
+- **Purpose**: Collects and exports node, network, consensus, and performance metrics.
+- **Collector**: `MetricsCollector` periodically collects and exports metrics as JSON.
+- **Schema**: Includes peer count, block height, committee size, approval rate, tx pool size, memory usage, goroutines, syncing status, and more.
+
+### Graceful Shutdown
+- **Purpose**: Ensures all node components shut down cleanly and in the correct order.
+- **Manager**: `GracefulShutdown` coordinates shutdown, handles OS signals, and reports status/reason.
+
 ## Architecture
 
 ### High-Level Architecture
@@ -409,6 +430,11 @@ type Config struct {
     EpochLength     int    `json:"epoch_length"`
     CommitteeSize   int    `json:"committee_size"`
     BlockInterval   int    `json:"block_interval"`
+    BatchSize       int    `json:"batch_size"`           // Transaction batch size
+    BatchTimeout    int    `json:"batch_timeout"`        // Batch flush timeout (ms)
+    MetricsInterval int    `json:"metrics_interval"`      // Metrics collection interval (ms)
+    FastSync        bool   `json:"fast_sync"`             // Enable fast sync
+    GracefulShutdown bool `json:"graceful_shutdown"`      // Enable graceful shutdown
 }
 ```
 
@@ -440,4 +466,11 @@ type Config struct {
 
 ## Conclusion
 
-Dyphira L1 provides a robust, scalable, and secure DPoS blockchain implementation with comprehensive testing and monitoring capabilities. The modular architecture allows for easy extension and customization while maintaining high performance and reliability. The cryptographic implementation using Secp256k1 ensures compatibility with Ethereum-based systems while providing strong security guarantees. 
+Dyphira L1 provides a robust, scalable, and secure DPoS blockchain implementation with comprehensive testing and monitoring capabilities. The modular architecture allows for easy extension and customization while maintaining high performance and reliability. The cryptographic implementation using Secp256k1 ensures compatibility with Ethereum-based systems while providing strong security guarantees.
+
+## Performance and Monitoring (updated)
+
+- **Batching**: High-throughput block production with configurable batch size/timeout.
+- **Fast Sync**: Rapid node synchronization, minimal downtime for new nodes.
+- **Metrics**: JSON export for monitoring, Prometheus/Grafana integration possible.
+- **Graceful Shutdown**: Clean shutdown, status reporting, and error handling. 

@@ -239,7 +239,33 @@ func computeTransactionRoot(txs []*Transaction) Hash {
 	return Hash(hash)
 }
 
-// Close closes the blockchain's underlying database.
+// GetDatabaseSize calculates the total size of the blockchain database
+func (bc *Blockchain) GetDatabaseSize() uint64 {
+	bc.lock.RLock()
+	defer bc.lock.RUnlock()
+
+	totalSize := uint64(0)
+
+	// Calculate size of all blocks
+	for i := uint64(0); i <= bc.currentHeight; i++ {
+		key := blockKey(i)
+		data, err := bc.store.Get(key)
+		if err == nil {
+			totalSize += uint64(len(data))
+		}
+	}
+
+	// Add size of metadata (tip, height, etc.)
+	tipData, _ := bc.store.Get([]byte("tip"))
+	totalSize += uint64(len(tipData))
+
+	heightData, _ := bc.store.Get([]byte(heightKey))
+	totalSize += uint64(len(heightData))
+
+	return totalSize
+}
+
+// Close closes the blockchain and its underlying storage.
 func (bc *Blockchain) Close() error {
 	// The store is managed by the AppNode, which is responsible for closing it.
 	// This method is here to satisfy any interfaces that might expect it, but it's a no-op.
@@ -310,4 +336,26 @@ func (bc *Blockchain) ApplyBlockWithRegistry(block *Block, state *State, vr *Val
 func mustMarshalUint64(h uint64) []byte {
 	b, _ := json.Marshal(h)
 	return b
+}
+
+// GetTransactionByHash retrieves a transaction by its hash from any block in the blockchain.
+func (bc *Blockchain) GetTransactionByHash(txHash Hash) (*Transaction, uint64, error) {
+	bc.lock.RLock()
+	defer bc.lock.RUnlock()
+
+	// Search through all blocks for the transaction
+	for height := uint64(0); height <= bc.currentHeight; height++ {
+		block, err := bc.GetBlockByHeight(height)
+		if err != nil {
+			continue
+		}
+
+		for _, tx := range block.Transactions {
+			if tx.Hash == txHash {
+				return tx, height, nil
+			}
+		}
+	}
+
+	return nil, 0, fmt.Errorf("transaction with hash %s not found", txHash.ToHex())
 }

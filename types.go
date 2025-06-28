@@ -4,6 +4,7 @@ import (
 	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
@@ -35,6 +36,47 @@ type Address [20]byte
 // ToHex converts an Address to its hexadecimal representation.
 func (a Address) ToHex() string {
 	return hex.EncodeToString(a[:])
+}
+
+// HexToAddress converts a hexadecimal string to an Address.
+func HexToAddress(hexStr string) (Address, error) {
+	fmt.Printf("DEBUG: HexToAddress called with: '%s', length: %d\n", hexStr, len(hexStr))
+	if len(hexStr) != 40 { // 20 bytes = 40 hex characters
+		return Address{}, fmt.Errorf("invalid address length: expected 40 characters, got %d", len(hexStr))
+	}
+
+	decoded, err := hex.DecodeString(hexStr)
+	if err != nil {
+		return Address{}, fmt.Errorf("invalid hex string: %w", err)
+	}
+
+	if len(decoded) != 20 {
+		return Address{}, fmt.Errorf("invalid address length: expected 20 bytes, got %d", len(decoded))
+	}
+
+	var addr Address
+	copy(addr[:], decoded)
+	return addr, nil
+}
+
+// HexToHash converts a hexadecimal string to a Hash.
+func HexToHash(hexStr string) (Hash, error) {
+	if len(hexStr) != 64 { // 32 bytes = 64 hex characters
+		return Hash{}, fmt.Errorf("invalid hash length: expected 64 characters, got %d", len(hexStr))
+	}
+
+	decoded, err := hex.DecodeString(hexStr)
+	if err != nil {
+		return Hash{}, fmt.Errorf("invalid hex string: %w", err)
+	}
+
+	if len(decoded) != 32 {
+		return Hash{}, fmt.Errorf("invalid hash length: expected 32 bytes, got %d", len(decoded))
+	}
+
+	var hash Hash
+	copy(hash[:], decoded)
+	return hash, nil
 }
 
 // Block represents a single block in the blockchain.

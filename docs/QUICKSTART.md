@@ -42,6 +42,7 @@ This will:
 - Register as a validator
 - Begin producing blocks
 - Create test transactions
+- **Enable fast sync, transaction batching, metrics, and graceful shutdown by default**
 
 ### Option 2: Multi-Node Network (Testing)
 
@@ -75,6 +76,24 @@ Run a comprehensive test with multiple nodes:
    ./dyphira-l1 -port 9001 -peer /ip4/127.0.0.1/tcp/9000/p2p/12D3KooW...
    ./dyphira-l1 -port 9002 -peer /ip4/127.0.0.1/tcp/9000/p2p/12D3KooW...
    ```
+
+## Observing New Features
+
+- **Metrics**: Metrics are collected and can be exported as JSON (see logs or API if enabled).
+- **Transaction Batching**: Batches are processed automatically; see logs for batch size, throughput, and processing time.
+- **Fast Sync**: New nodes will fast sync to the latest block height if behind; see logs for sync progress.
+- **Graceful Shutdown**: Stop the node with Ctrl+C or SIGTERM; all components will shut down cleanly and report status.
+
+## Troubleshooting New Features
+
+- **Batching**: If transactions are not included quickly, adjust batch size/timeout in config or CLI flags.
+- **Fast Sync**: If sync is slow, check peer connectivity and logs for sync status.
+- **Metrics**: If metrics are missing, ensure metrics collector is enabled and check logs for export status.
+- **Graceful Shutdown**: If shutdown hangs, check logs for which component is blocking.
+
+## For more details
+- See `README.md` for full documentation
+- See `TECHNICAL.md` and `TECHNICAL_SPEC.md` for architecture and protocol details
 
 ## What You'll See
 

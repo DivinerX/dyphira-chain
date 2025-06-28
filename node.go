@@ -64,6 +64,17 @@ type AppNode struct {
 	chainStore     Storage
 	validatorStore Storage
 
+	// Metrics collection
+	metrics *MetricsCollector
+
+	// Block synchronization
+	syncTicker *time.Ticker
+	syncDone   chan bool
+
+	// Fast Sync and Transaction Batching
+	fastSyncManager    *FastSyncManager
+	transactionBatcher *TransactionBatcher
+
 	// --- TESTING ONLY ---
 	DisableTestTransactions bool // If true, disables addTestTransactions in Start()
 }
@@ -133,6 +144,7 @@ func NewAppNode(ctx context.Context, listenPort int, dbPath string, p2pPrivKey c
 		inactivity:        make(map[Address]int),
 		chainStore:        chainStore,
 		validatorStore:    validatorStore,
+		metrics:           NewMetricsCollector(),
 	}
 
 	// --- Handshake Manager ---
@@ -143,6 +155,12 @@ func NewAppNode(ctx context.Context, listenPort int, dbPath string, p2pPrivKey c
 
 	// --- Inactivity Monitor ---
 	node.inactivityMonitor = NewInactivityMonitor(node, false) // Default to non-seed node
+
+	// --- Fast Sync Manager ---
+	node.fastSyncManager = NewFastSyncManager(node)
+
+	// --- Transaction Batcher ---
+	node.transactionBatcher = NewTransactionBatcher(txPool, 100, 5*time.Second)
 
 	// Wire up optimistic push for newly promoted peers
 	barNet.SetOnPeerStatusChange(func(peerID peer.ID, oldStatus, newStatus PeerStatus) {
@@ -222,6 +240,7 @@ func NewAppNodeWithStores(ctx context.Context, listenPort int, p2pPrivKey crypto
 		inactivity:        make(map[Address]int),
 		chainStore:        chainStore,
 		validatorStore:    validatorStore,
+		metrics:           NewMetricsCollector(),
 	}
 
 	// --- Handshake Manager ---
@@ -232,6 +251,12 @@ func NewAppNodeWithStores(ctx context.Context, listenPort int, p2pPrivKey crypto
 
 	// --- Inactivity Monitor ---
 	node.inactivityMonitor = NewInactivityMonitor(node, false) // Default to non-seed node
+
+	// --- Fast Sync Manager ---
+	node.fastSyncManager = NewFastSyncManager(node)
+
+	// --- Transaction Batcher ---
+	node.transactionBatcher = NewTransactionBatcher(txPool, 100, 5*time.Second)
 
 	// Wire up optimistic push for newly promoted peers
 	barNet.SetOnPeerStatusChange(func(peerID peer.ID, oldStatus, newStatus PeerStatus) {
@@ -260,9 +285,18 @@ func NewAppNodeWithStores(ctx context.Context, listenPort int, p2pPrivKey crypto
 	return node, nil
 }
 
-// Close gracefully shuts down the node.
+// Close closes the node and all its resources.
 func (n *AppNode) Close() error {
 	log.Printf("Closing node %s", n.address.ToHex())
+
+	// Stop block synchronization
+	if n.syncTicker != nil {
+		n.syncTicker.Stop()
+	}
+	if n.syncDone != nil {
+		close(n.syncDone)
+	}
+
 	// Close the p2p host, blockchain db, etc.
 	if err := n.p2p.host.Close(); err != nil {
 		log.Printf("Error closing p2p host: %v", err)
@@ -290,6 +324,11 @@ func (n *AppNode) Start() error {
 	go n.p2p.Discover(n.ctx)
 	go n.producerLoop()
 
+	// Start block synchronization
+	n.syncTicker = time.NewTicker(10 * time.Second) // Check every 10 seconds
+	n.syncDone = make(chan bool)
+	go n.syncLoop()
+
 	// Start BAR handshake manager
 	n.handshakeManager.Start(n.ctx)
 
@@ -298,6 +337,12 @@ func (n *AppNode) Start() error {
 
 	// Start BAR inactivity monitor
 	n.inactivityMonitor.Start(n.ctx)
+
+	// Start Fast Sync Manager (if node is behind)
+	if n.bc.Height() < 10 {
+		log.Printf("INFO: Node %s starting fast sync (height: %d)", n.address.ToHex(), n.bc.Height())
+		n.fastSyncManager.Start(n.ctx)
+	}
 
 	// Broadcast our validator registration to the network
 	go n.broadcastValidatorRegistration()
@@ -358,6 +403,17 @@ func (n *AppNode) handleTransaction(msg *pubsub.Message) {
 		return
 	}
 
+	if netTx.Tx == nil {
+		log.Printf("Received nil transaction in network message")
+		n.barNet.UpdatePOMScore(msg.ReceivedFrom, 1, "nil transaction in message")
+		return
+	}
+	if netTx.PubKey == nil {
+		log.Printf("Received nil public key in network message")
+		n.barNet.UpdatePOMScore(msg.ReceivedFrom, 1, "nil pubkey in message")
+		return
+	}
+
 	log.Printf("DEBUG: Node %s received transaction %s", n.address.ToHex(), netTx.Tx.Hash.ToHex())
 
 	pubKey, err := UnmarshalPublicKey(netTx.PubKey)
@@ -374,6 +430,9 @@ func (n *AppNode) handleTransaction(msg *pubsub.Message) {
 		n.barNet.UpdatePOMScore(msg.ReceivedFrom, 1, "invalid transaction")
 		return
 	}
+
+	// Record metrics for successful transaction
+	n.metrics.RecordTransaction()
 
 	log.Printf("SUCCESS: Node %s added transaction %s to pool", n.address.ToHex(), netTx.Tx.Hash.ToHex())
 }
@@ -462,17 +521,13 @@ func (n *AppNode) processReceivedBlock(block *Block) {
 		}
 		log.Printf("INFO: Node %s added self-approval for block %s. Total approvals: %d/%d",
 			n.address.ToHex(), block.Header.Hash.ToHex(), len(approval.Signatures), approval.Threshold)
-
-		// After self-approving, check if the block is ready for finalization.
-		if approval.IsApproved() {
-			go n.finalizeApprovedBlock(block)
-		}
-
-		n.broadcastApproval(block)
-	} else {
-		log.Printf("INFO: Node %s processing block #%d (not in committee, will not vote)",
-			n.address.ToHex(), block.Header.BlockNumber)
 	}
+	// After self-approving, check if the block is ready for finalization.
+	if approval.IsApproved() {
+		go n.finalizeApprovedBlock(block)
+	}
+
+	n.broadcastApproval(block)
 }
 
 func (n *AppNode) handleApproval(msg *pubsub.Message) {
@@ -614,8 +669,93 @@ func (n *AppNode) producerLoop() {
 				n.barNet.CleanupReputationRecords()
 			}
 
-			// Continue with existing block production logic
+			// Update committee and proposer selection
 			n.ForceCommitteeAndProposer()
+
+			// Check if we should propose a block
+			currentHeight := n.bc.Height()
+			nextHeight := currentHeight + 1
+
+			// Check if we have a proposer selector and committee
+			if n.proposerSelector == nil || len(n.committee) == 0 {
+				log.Printf("DEBUG: No proposer selector or committee available, skipping block production")
+				continue
+			}
+
+			// Check if we are the proposer for the next block
+			proposer := n.proposerSelector.ProposerForBlock(nextHeight)
+			if proposer == nil {
+				log.Printf("DEBUG: No proposer assigned for block height %d", nextHeight)
+				continue
+			}
+
+			if proposer.Address == n.address {
+				log.Printf("INFO: Node %s is proposer for block height %d", n.address.ToHex(), nextHeight)
+
+				// Create optimized transaction batch
+				batch := n.txPool.CreateOptimizedBatch(n.state)
+				txs := batch.Transactions
+
+				log.Printf("INFO: Created optimized batch with %d transactions, total fee: %d, priority: %.3f",
+					len(txs), batch.TotalFee, batch.Priority)
+
+				// Create the block
+				block, err := n.bc.CreateBlock(txs, proposer, n.privKey)
+				if err != nil {
+					log.Printf("ERROR: Failed to create block: %v", err)
+					continue
+				}
+
+				// Sign the block
+				if err := block.Sign(n.privKey); err != nil {
+					log.Printf("ERROR: Failed to sign block: %v", err)
+					continue
+				}
+
+				// Add the block to our blockchain
+				if err := n.bc.AddBlock(block); err != nil {
+					log.Printf("ERROR: Failed to add block to blockchain: %v", err)
+					continue
+				}
+
+				// Apply the block to our state
+				if err := n.bc.ApplyBlockWithRegistry(block, n.state, n.vr); err != nil {
+					log.Printf("ERROR: Failed to apply block to state: %v", err)
+					continue
+				}
+
+				// Remove used transactions from the pool
+				for _, tx := range txs {
+					n.txPool.RemoveTransaction(tx.Hash)
+				}
+
+				log.Printf("INFO: Node %s successfully created and added block %d with %d transactions",
+					n.address.ToHex(), nextHeight, len(txs))
+
+				// Record metrics for block production
+				n.metrics.RecordBlockProduction()
+
+				// Record metrics for transactions
+				for range txs {
+					n.metrics.RecordTransaction()
+				}
+
+				// Broadcast the block proposal to other nodes
+				blockData, err := json.Marshal(block)
+				if err != nil {
+					log.Printf("ERROR: Failed to marshal block: %v", err)
+					continue
+				}
+
+				if err := n.p2p.Publish(n.ctx, BlockTopic, blockData); err != nil {
+					log.Printf("ERROR: Failed to broadcast block: %v", err)
+				} else {
+					log.Printf("INFO: Node %s broadcasted block %d", n.address.ToHex(), nextHeight)
+				}
+			} else {
+				log.Printf("DEBUG: Node %s is not proposer for block height %d (proposer: %s)",
+					n.address.ToHex(), nextHeight, proposer.Address.ToHex())
+			}
 		}
 	}
 }
@@ -856,6 +996,13 @@ func (n *AppNode) finalizeApprovedBlock(block *Block) {
 		return
 	}
 	log.Printf("SUCCESS: Node %s applied block %d transactions to state.", n.address.ToHex(), block.Header.BlockNumber)
+
+	// Record metrics for block finalization
+	n.metrics.RecordBlockProduction()
+
+	// Record finality time (simplified - could be enhanced with actual timing)
+	n.metrics.RecordFinalityTime(250 * time.Millisecond) // Default timeout from watchBlockApproval
+
 	for _, tx := range block.Transactions {
 		n.txPool.RemoveTransaction(tx.Hash)
 	}
@@ -1019,6 +1166,33 @@ func (n *AppNode) addTestTransactions() {
 				}
 				break
 			}
+		}
+	}
+}
+
+func (n *AppNode) syncLoop() {
+	for {
+		select {
+		case <-n.syncDone:
+			return
+		case <-n.syncTicker.C:
+			n.performBlockSync()
+		}
+	}
+}
+
+func (n *AppNode) performBlockSync() {
+	currentHeight := n.bc.Height()
+
+	// Check if we have any connected peers by checking if we can publish
+	// For simplicity, we'll just request the next few blocks we might be missing
+	for height := currentHeight + 1; height <= currentHeight+3; height++ {
+		// Check if we have a block at this height by trying to get it
+		_, err := n.bc.GetBlockByHeight(height)
+		if err != nil {
+			// Block doesn't exist at this height, request it
+			log.Printf("DEBUG: Node %s requesting block %d for synchronization", n.address.ToHex(), height)
+			n.RequestBlock(height)
 		}
 	}
 }

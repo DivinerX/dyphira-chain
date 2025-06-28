@@ -146,3 +146,32 @@ func AddressToBech32(addr Address) (string, error) {
 func GenerateSecp256k1Key() (*btcec.PrivateKey, error) {
 	return btcec.NewPrivateKey()
 }
+
+// ExportSnapshot exports all accounts in the state as a snapshot
+func (s *State) ExportSnapshot() ([]*Account, error) {
+	accounts := []*Account{}
+	if s.Trie == nil {
+		return accounts, nil
+	}
+	for _, kv := range s.Trie.All() {
+		var acc Account
+		if err := json.Unmarshal(kv.Value, &acc); err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, &acc)
+	}
+	return accounts, nil
+}
+
+// ImportSnapshot imports a snapshot of accounts into the state (overwrites existing)
+func (s *State) ImportSnapshot(accounts []*Account) error {
+	if s.Trie == nil {
+		s.Trie = NewMerkleTrie()
+	}
+	for _, acc := range accounts {
+		if err := s.PutAccount(acc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
